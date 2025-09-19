@@ -119,6 +119,11 @@ ros2 launch ocs2_quadruped_controller mujoco.launch.py
 ros2 run keyboard_input keyboard_input
 ```
 
+## start dds->ros2
+```bash
+ros2 run hardware_unitree_ros2 dds_ros2_bridge_node --ros-args -p domain:=19
+```
+
 demo
 ![](resource/demo.gif)
 

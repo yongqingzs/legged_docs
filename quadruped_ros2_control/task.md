@@ -232,3 +232,28 @@ hardware_unitree_ros2 目前无法直接接收 unitree_mujoco 发出的 dds 消�
 - 该节点能类似 hardware_unitree_sdk2，接收 dds 消息，并转发 ros2 消息
 - 该节点能接收 hardware_unitree_ros2 发出的 ros2 消息，并转发为 dds 消息
 - 需要在 hardware_unitree_ros2 添加 crc 等类似处理
+
+## task29
+在 dds_ros2_bridge_node 节点中添加新功能：
+1. log_flag = 1 时，接收 "control_input_msgs/msg/inputs.hpp" 消息 
+2. 当 inputs_.command 发生变化后，记录 10s 的 low_state 和 low_cmd 到 csv 文件中
+- csv 文件需要说明 command 切换
+3. 提供绘制 low_state 和 low_cmd 的 python 脚本
+
+## task30
+修改调用 python3 脚本绘图的逻辑:
+1. 先索引包位置( 该脚本在 hardware_unitree_ros2/scripts 下)，索引到位置进行调用
+2. 检测 ～/venvs 下是否存在 motor 环境，如果存在则 activate motor 环境后再调用脚本
+如果不存在则先在 ～/venvs 下创建 motor 环境，并安装 numpy、matplotlib、pandas 包，然后 activate motor 环境后再调用脚本
+3. 以上逻辑写成单独的函数进行调用
+
+## task31
+根据 HardwareRos2Bridge 节点，实现一个数据记录和可视化的节点。要求如下:
+1. 功能逻辑按照 HardwareRos2Bridge，但不处理 dds 消息，只接收 low_cmd、low_state 消息，并进行相应的数据处理;
+
+## task32
+分析 go1.xml 与读取文件相关代码，说明以下内容，并将说明内容写进 go1_xml.md:
+1. (关键)各电机的初始位置和位置上下界如何定义，坐标系如何定义
+2. imu的初始位置如何定义，坐标系如何定义
+3. 如何实现仿真和实际机器狗传感器关系的映射
+@unitree_mujoco/unitree_robots/go1/go1.xml @unitree_mujoco/simulate/ @legged_docs/quadruped_ros2_control/external/go1_xml.md
