@@ -257,3 +257,23 @@ hardware_unitree_ros2 目前无法直接接收 unitree_mujoco 发出的 dds 消�
 2. imu的初始位置如何定义，坐标系如何定义
 3. 如何实现仿真和实际机器狗传感器关系的映射
 @unitree_mujoco/unitree_robots/go1/go1.xml @unitree_mujoco/simulate/ @legged_docs/quadruped_ros2_control/external/go1_xml.md
+
+## task33
+分析 free_dog_sdk_cpp 的代码，将其转换为 ros2-jazzy 节点，另外:
+1. 消息类型可用 unitree_go/msg/LowCmd、unitree_go/msg/LowState 等 ros2 消息类型
+2. 包放在 src/ 下
+3. 完成后输出说明文档
+
+## task34
+参照 hardware_unitree_sdk2 的实现，完成 hardware_free_dog_sdk 包:
+1. 将数据接收和发送改为使用 free_dog_sdk_cpp 的接口(直接调用)
+2. 可以参照 legged_unitree_hw_free 的实现(其针对 ros_control)
+
+## task35
+分析 unitree_guide_controller，说明:
+1. 各模块功能以及重要方法
+2. 各模块的交互和数据流传输(可以用 Mermaid 表示，但也需用文字表述流程)
+3. 其使用什么控制方法
+4. 其步态切换是如何实现的
+5. 说明你觉得应当说明的内容
+6. 将整理好的内容输出到 legged_docs/quadruped_ros2_control 下的 unitree_guide_controller.md 中
