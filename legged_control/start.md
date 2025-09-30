@@ -33,6 +33,50 @@ catkin build legged_gazebo -j4
 sudo apt-get install ros-noetic-teleop-twist-keyboard
 ```
 
+build legged_unitree_hw_free
+```bash
+catkin build legged_controllers legged_unitree_hw_free -j4
+```
+
+## hw start
+初始化
+```bash
+# terminal1
+roslaunch legged_unitree_hw_free legged_unitree_hw_free.launch
+
+# terminal2
+roslaunch legged_controllers load_controller.launch cheater:=false
+
+# terminal3
+rosservice call /controller_manager/switch_controller "start_controllers: ['controllers/legged_controller']                   
+stop_controllers: ['']
+strictness: 0
+start_asap: false
+timeout: 0.0" 
+```
+
+启动
+```bash
+# cmd_vel 先站起来
+rostopic pub /cmd_vel geometry_msgs/Twist "linear:
+  x: 0.0
+  y: 0.0
+  z: 0.1
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0" -r 10
+
+# gait
+# 切换为1
+```
+
+控制方式1
+```bash
+rosrun teleop_twist_keyboard teleop_twist_keyboard.py
+```
+
+
 ## start
 初始化
 ```bash
