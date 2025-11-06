@@ -3,5 +3,6 @@
 [legged_control](https://github.com/qiayuanl/legged_control)  
 [ocs2_ros2](https://github.com/legubiao/ocs2_ros2)  
 [quadruped_ros2_control](https://github.com/legubiao/quadruped_ros2_control)  
-[walk-these-ways](https://github.com/Improbable-AI/walk-these-ways.git)  
+[walk-these-ways](https://github.com/Improbable-AI/walk-these-ways)  
 [Cheetah-Software](https://github.com/mit-biomimetics/Cheetah-Software)
+[rl_sar](https://github.com/fan-ziqi/rl_sar)
