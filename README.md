@@ -6,4 +6,5 @@
 [walk-these-ways](https://github.com/Improbable-AI/walk-these-ways)  
 [Cheetah-Software](https://github.com/mit-biomimetics/Cheetah-Software)  
 [rl_sar](https://github.com/fan-ziqi/rl_sar)  
-[Odin-Nav-Stack](https://github.com/ManifoldTechLtd/Odin-Nav-Stack.git)
+[Odin-Nav-Stack](https://github.com/ManifoldTechLtd/Odin-Nav-Stack.git)  
+[rknn-llm](https://github.com/airockchip/rknn-llm)
