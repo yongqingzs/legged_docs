@@ -176,3 +176,85 @@ resume_route => success=false, message='Failed to resume route'
 [INFO] [1775705797.623385059] [task_hub_node]: Received resume_route request
 "， pause_route 直接卡住，而 resume_route 却能在 pause_route 未完成的时候接收。
 完成后编译通过"cd ~/nav_ws && cbu inspection_task_hub --symlink-install"，并且能正常运行，不完成请不要结束。
+
+
+## 任务中枢优化23
+当前 arrival_action: "hold" 是无效的，请找出原因，并进行相应修复。完成后编译通过"cd ~/nav_ws && cbu inspection_task_hub --symlink-install"，并且能正常运行，不完成请不要结束。
+
+
+## 任务中枢优化25
+我测试 hold 功能的时候出现问题。终端1: "ros2 run inspection_task_hub task_hub_node"，终端2: "ros2 run inspection_task_hub task_hub_interactive_test"。发现"- id: 1
+name: "Zone A - East Wing"
+frame_id: "map_floor_1"
+max_retry: 1
+arrival_action: "hold"" 并没有生效，任务中枢节点仍然在执行具体任务，请修复。完成后编译通过"cd ~/nav_ws && cbu inspection_task_hub --symlink-install"，并且能正常运行，不完成请不要结束。
+
+
+## 任务中枢优化26
+现在"command_type: "dual_coordinate""时，给机器人发送"1. target_position: [12.0, 8.0, 1.2]  2. 云台位置"，但现在希望发送的是:
+1. target_position
+2. 机器人位置(最后记录的 feedback)
+3. 机器人朝向的四元数(最后记录的 feedback)
+4. gimbal_mount_offset(安装偏置)
+也就是云台位置的处理不由任务中枢进行，并增加朝向的四元数。
+同时修改 test 下的测试用例和 README。完成后编译通过"cd ~/nav_ws && cbu inspection_task_hub --symlink-install"，并且能正常运行，不完成请不要结束。
+
+
+## 任务中枢优化27
+像这些服务/请求:
+"
+# 开始，发送 yaml 位置
+ros2 service call /start_route inspection_task_hub/srv/StartRoute "{route_config_path: '/home/cat/Workspace/algor_ws/src/inspection_task_hub/config/fhzn_test.yaml'}"
+# CancelRoute
+ros2 service call /cancel_route inspection_task_hub/srv/CancelRoute "{}"
+# GetStatus
+ros2 service call /get_status inspection_task_hub/srv/GetStatus
+# PauseRoute
+ros2 service call /pause_route inspection_task_hub/srv/PauseRoute
+# ResumeRoute
+ros2 service call /resume_route inspection_task_hub/srv/ResumeRoute
+"
+我希望都可以通过终端直接发送，但是现在测试发现:
+"[ERROR] [1776756405.897947833] [task_hub_node]: No available provider for service /inspection_start
+"
+请修改这个问题
+
+
+## 任务中枢优化28
+本地记录的日志需要包含发送和接收消息的详细信息。event_log.txt 改为按照总 yaml 开始时间存储(每次执行都是一个单独的时间日志文件); 不再需要 task_progress.txt。
+
+
+## 任务中枢优化28
+当前项目有一些需要修改的地方:
+1. 删除 /inspection_start、/inspection_stop 这两种消息和相关逻辑
+2. 添加趴下、站立这两种任务
+- 站立服务名: ~/stand , 类型名: std_srvs/srv/Trigger
+- 趴下服务名: ~/lie , 类型名: std_srvs/srv/Trigger
+说明:
+- 站立是所有的第一个任务(但也可以不是，例程 yaml 中按第一个，为到达前执行)
+- 趴下是所有的最后一个任务(但也可以不是，例程 yaml 中按最后一个，为到达后执行)
+3. 对每个任务模块进行心跳信号监听，现在和两个任务模块交互: 导航、云台。消息类型为 diagnostic_msgs/msg/DiagnosticArray，消息名称由你确定(但需格式一致)。
+说明:
+- 如果心跳正常，则不进行操作; 心跳不正常，请进行事件记录(当前没有具体的触发后逻辑)，并在终端打印(不要一直打印)
+- 心跳信号监听需使用单独的线程，/start_route 时就开始监听
+
+同时修改 test 下的测试用例和 README。完成后编译通过"cd ~/nav_ws && cbu inspection_task_hub --symlink-install"，并且能正常运行，不完成请不要结束。
+
+
+## 任务中枢优化29
+当前发给云台控制的是 waypoint 最后一个 feedback，这种方式没考虑实时扰动，请改为发送云台控制 action 时，实时获取位置，位置信息来自 "消息名称: /odometry_horizon，消息类型: nav_msgs::msg::Odometry"。
+
+
+## 任务中枢优化30
+当前 task_hub_node.cpp 单个文件太大，如何拆解使其单个文件不过大？task_hub 之后需要和 GUI 平台交互，需要新增和平台之间交互的接口(如: 启动、暂停、停止等功能。现在不添加，但到时候添加会使 task_hub_node.cpp 更大)，如何规划？
+
+
+## 任务中枢优化31
+当前 task_hub_node.cpp 单个文件太大，拆解单个文件以不过大，使其更易维护和符合规范(当前无需实现和 GUI 平台联通的逻辑，但需要考虑设计好整体结构方便到时候新增消息接口以及和 GUI 平台的消息协议)。不能影响现有功能，并测试通过。
+
+
+## 任务中枢优化32
+需要优化两个内容: 
+1. gimbal 任务也需要添加 zoom_level 属性，以提供微调使用(同时保留 capture.zoom_level 属性)。2. 当前 include、src 下各文件需要放入不同的子文件夹，以结构清晰。
+测试通过并修改相应的 README。
+
