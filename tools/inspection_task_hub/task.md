@@ -258,3 +258,32 @@ ros2 service call /resume_route inspection_task_hub/srv/ResumeRoute
 1. gimbal 任务也需要添加 zoom_level 属性，以提供微调使用(同时保留 capture.zoom_level 属性)。2. 当前 include、src 下各文件需要放入不同的子文件夹，以结构清晰。
 测试通过并修改相应的 README。
 
+
+## 任务中枢优化33
+阅读 config 下的 yaml 文件，需要新增任务失败处理功能:
+1. 当前各任务类型没有失败处理机制，失败处理分为两种: 返回安全点(安全点在 yaml 中配置，默认为第一个航路点); 跳过该任务。
+2. 应该在 yaml 中添加根据任务类型的失败处理配置。当前所有任务先配置成跳过该任务。
+3. 修改相应的测试用文件 task_hub_workflow_test、task_hub_interactive_test。
+测试时终端1: "ros2 launch inspection_task_hub task_hub_node.launch.py"，终端2: "ros2 run inspection_task_hub task_hub_workflow_test"或"ros2 run inspection_task_hub task_hub_interactive_test"。
+编译位置需要在"~/nav_ws"下。测试通过并修改相应的 README。
+
+
+## 任务中枢优化34
+对 yaml 的修改有些不符合预期，failure_handling 不应该添加在每个 task 下，而是在 yaml 的开头设置一个全局配置，根据任务类型(而非每个任务)进行一个整体的任务失败管理。
+
+## 任务中枢优化35
+阅读 config 下的 yaml 文件，需要新增导航点失败处理功能:
+1. 导航点也需要类似的失败处理功能，失败处理分为两种: 返回安全点(安全点在 yaml 中配置，默认为第一个航路点); 跳过该点。
+2. 应该在 yaml 中添加导航点的失败处理配置。当前所有任务先配置成跳过该点。
+3. 修改相应的测试用文件 task_hub_workflow_test、task_hub_interactive_test。
+测试时终端1: "ros2 launch inspection_task_hub task_hub_node.launch.py"，终端2: "ros2 run inspection_task_hub task_hub_workflow_test"或"ros2 run inspection_task_hub task_hub_interactive_test"。
+编译位置需要在"~/nav_ws"下。测试通过并修改相应的 README。
+
+
+## 任务中枢优化36
+需要在 yaml 中添加一个关于失败处理的全局配置(包含 waypoints、tasks )，这个全局配置可以控制失败处理的默认选项，但是单独设置可以覆盖它。
+编译位置需要在"~/nav_ws"下。测试通过并修改相应的 README。
+
+
+## 任务中枢优化37
+你这个全局配置有些问题，我不希望是一个整体的全局配置，而是划分类型，如: 导航、云台控制、拍照。需要包含现有的任务类型。
