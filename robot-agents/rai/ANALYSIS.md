@@ -407,7 +407,7 @@ graph TB
         Nav2Blocking["Nav2Blocking<br/>阻塞式导航"]
         ManipTools["机械臂工具<br/>自定义抓取"]
         SimpleTools["Simple ROS2 Tools<br/>简易操作"]
-        CLI Tools["ROS2 CLI<br/>ros2 命令包装"]
+        CLITools["ROS2 CLI<br/>ros2 命令包装"]
     end
 
     BaseROS2Tool --> BaseROS2Toolkit
