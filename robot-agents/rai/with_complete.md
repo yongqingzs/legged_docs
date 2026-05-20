@@ -1,4 +1,75 @@
 # 关键点
+
+## RAI Agent 分层架构与范式总览
+
+### 两层分离设计：`core/`（工作流）与外层（运行时）
+
+RAI 的 `langchain/` 目录采用**双层架构**，将 LangGraph 工作流定义与机器人运行时分隔：
+
+```
+langchain/
+├── agent.py                  ← 运行时层（LangChainAgent — 基类）
+├── react_agent.py            ← 运行时层（ReActAgent）
+├── state_based_agent.py      ← 运行时层（BaseStateBasedAgent）
+│
+└── core/
+    ├── react_agent.py        ← 工作流层（create_react_runnable）
+    ├── state_based_agent.py  ← 工作流层（create_state_based_runnable）
+    ├── plan_agent.py         ← 工作流层（create_plan_execute_agent）
+    ├── megamind.py           ← 工作流层（create_megamind）
+    ├── structured_output_agent.py
+    ├── conversational_agent.py
+    └── tool_runner.py
+```
+
+**`core/` = 纯 LangGraph 工作流**（输出 `CompiledStateGraph`）
+
+这些 `create_*` 函数只做一件事：构建 LangGraph state graph。它们**不关心**机器人运行时——没有线程管理、没有消息队列、没有 HRI connector。任何人可以直接 `invoke()` 调用，无需 ROS 2 环境。
+
+**外层（`./`）= 机器人运行时封装**
+
+`LangChainAgent` 提供了运行时需要的一切：线程循环（`_run_loop`）、消息缓冲（`_received_messages`）、中断机制（`_interrupt_event`）、HRI connector 通信、`run()`/`stop()` 生命周期。外层的 `ReActAgent` 和 `BaseStateBasedAgent` 就是把 `core/` 的 runnable 包进去：
+
+```python
+class ReActAgent(LangChainAgent):
+    def __init__(...):
+        runnable = create_react_runnable(llm, tools, prompt)  # ← 从 core/ 来
+        super().__init__(runnable=runnable, ...)              # ← 交给运行时
+```
+
+**设计意图**：workflows 可以独立开发测试，运行时只负责"带上了路"——加上线程、消息、和 ROS 2 的连接。
+
+### 继承链
+
+```
+BaseAgent (抽象基类, 定义 run/stop 接口)
+  └── LangChainAgent          ← 通用心跳循环 + 消息队列 + HRI 桥接
+        ├── ReActAgent        ← 注入 create_react_runnable
+        └── BaseStateBasedAgent ← 注入 create_state_based_runnable + 聚合循环
+              └── ROS2StateBasedAgent ← ROS 2 Node 生命周期
+```
+
+### 五种 Agent 范式对比
+
+| 范式 | 所在文件 | 核心思路 | 有运行时封装？ |
+|------|---------|---------|-------------|
+| **ReActAgent** | `core/react_agent.py` + `react_agent.py` | LLM 自主"思考→调用工具→观察结果→再思考"循环 | 是 |
+| **StateBasedAgent** | `core/state_based_agent.py` + `state_based_agent.py` | 定时聚合 ROS 2 传感器数据为 state，注入 LLM 上下文后推理 | 是 |
+| **PlanAgent** | `core/plan_agent.py` | 规划→执行→重规划三阶段，三颗独立 LLM（planner/executor/replanner）分解多步任务 | 否 |
+| **MegamindAgent** | `core/megamind.py` | "大脑" LLM 通过 handoff tool 把子任务委派给多个 Executor 子代理，每步有结构化评估 | 否 |
+| **StructuredOutputAgent** | `core/structured_output_agent.py` | 单轮推理，输出通过 Pydantic schema 结构化，不调用工具 | 否 |
+
+> 已废弃的 `ConversationalAgent`（`core/conversational_agent.py`）是最早的 ReAct 手工实现，3.0 版本将被移除。
+
+### 为什么 PlanAgent 和 Megamind 没有运行时封装？
+
+它们停留在"引擎已就绪，车身没装"的阶段——可以直接 `invoke()` 或 `stream()` 调用，但缺少：
+- 继承 `LangChainAgent` 获得 `run()`/`stop()` 线程生命周期
+- 连接 HRI connector 做 ROS 2 消息收发
+- 集成到 `AgentRunner` 的多代理信号安全系统中
+
+`MegamindAgent` 在实际应用中（如 agentic-mobile-manipulator）是通过自定义的 `AgentOrchestrator` 直接 `astream()` 调用的，绕过了标准的 `LangChainAgent` 运行时。
+
 ## ros2 action
 
 RAI 实际上提供了两种模式来处理 ROS 2 action 的连续性。
