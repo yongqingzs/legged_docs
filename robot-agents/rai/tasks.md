@@ -244,3 +244,69 @@ demo 最终应该只剩：
 1. 先抽 users.py 和 session.py，因为它们最稳定、风险最低。
 2. 再抽 Streamlit sidebar，这能立刻减少 demo 文件复杂度。
 3. 最后抽 graph builder，因为这里和不同 agent/tool/prompt 的接口设计要更谨慎。
+
+
+## task16
+分析问题:
+让 agent 记忆地点时，会固定调用失败一次，第二次才成功:
+"2026-05-27 22:52:18 user rai.agents.langchain.core.tool_runner[907388] INFO Running tool: save_location, args: {'description': 'The toilet located at the specified coordinates.', 'location_name': 'Toilet', 'objects': '[]', 'pose': '{"x": 0, "y": 0, "z": 3.0}'}
+2026-05-27 22:52:19 user rai.agents.langchain.core.tool_runner[907388] INFO 
+                                    Validation error in tool save_location:
+                                    SaveLocationToolInput
+                                    Number of errors: 1
+                                    Errors:
+                                    [
+  {
+    "type": "list_type",
+    "loc": [
+      "objects"
+    ],
+    "msg": "Input should be a valid list",
+    "input": "[]"
+  }
+]"
+
+修复方案：
+1. 给 SaveLocationToolInput.objects 加 field_validator("objects", mode="before")
+    - None 保持 None
+    - list 原样返回
+    - str 时尝试 json.loads(value)
+    - 解析后如果是 list，返回
+    - 如果是空字符串，也可以按 [] 处理
+    - 其他情况交给 Pydantic 报错
+2. _run 的类型也同步放宽成：
+
+    objects: Optional[list[str] | str] = None
+
+    虽然 Pydantic 会先处理，但保持 schema 和运行签名一致更清楚。
+
+3. 补测试：
+    - objects=[] 正常
+    - objects="[]" 正常
+    - objects='["sink", "door"]' 正常
+    - 非 list JSON，例如 objects='{"a":1}' 应该失败
+4. prompt 可以顺手加强，但不应该只靠 prompt：
+    - 明确 objects 是数组，例如 objects: []
+    - 但模型仍可能输出字符串，所以 validator 才是根治。
+
+
+## task17
+分析问题:
+1. agent 调用工具时，页面上会显示"完成工具调用"以及工具调用的情况。但是页面刷新或重新加载后，"完成工具调用"框就会变成空白。
+
+修复方案:
+1. 不把 callback 生成的 tool status 当作历史 UI。
+    它只适合显示“正在调用工具”的实时过程。
+2. 刷新后从 checkpointed AIMessage.tool_calls 和 ToolMessage 重建工具调用展示。
+    也就是历史工具调用应该由持久消息渲染，而不是依赖 callback 状态。
+3. 主聊天区渲染消息时增加 ToolMessage/AIMessage tool_calls 的处理：
+    - AIMessage.tool_calls 展示“调用工具：xxx”和参数
+    - 匹配后续 ToolMessage.tool_call_id 展示结果
+    - 这样刷新后也能完整恢复
+4. callback 的实时 status 可以保留，但只用于当前轮流式反馈。
+    当前轮结束后，最终 UI 应以 result["messages"] 重新渲染的持久消息为准。
+
+
+## TODO18
+1. ruff 检查
+2. 短期记忆定期合并的测试
