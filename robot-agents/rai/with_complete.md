@@ -72,49 +72,138 @@ BaseAgent (抽象基类, 定义 run/stop 接口)
 
 ## ros2 action
 
-RAI 实际上提供了两种模式来处理 ROS 2 action 的连续性。
+RAI 提供**两套模式**处理 ROS 2 action 的连续性（goal → feedback stream → result）。
 
-### 模式 1：异步 fire-and-forget + 轮询（通用模式）
+### 调用链路：从顶层入口到 `action.py`
 
-这是 `ROS2ActionAPI.send_goal()` 的实现（`action.py:193-248`）：
+#### 模式 1：异步模式 — 5 层调用链
 
-1. **发送 goal** → `send_goal_async()` 立即返回 Future
-2. **存储 handle** → 把 `goal_future`、`result_future`、`client_goal_handle`、`feedbacks[]` 都存在 `self.actions[handle]` dict 里
-3. **注册 callback** → feedback 回调自动收集到 `feedbacks[]` list；done 回调在 action 完成时触发
-4. **返回 handle string** → 不阻塞
+```mermaid
+sequenceDiagram
+    participant Demo as 1. Demo/应用层<br>rosbot-xl-demo.py
+    participant LG as 2. LangGraph<br>ToolRunner
+    participant Tool as 3. Tool 层<br>StartROS2ActionTool
+    participant Mixin as 4a. Connector<br>action_mixin.py
+    participant API as 4b. API 层<br>action.py
+    participant ROS as 5. ROS 2 底层<br>ActionClient
 
-然后 LLM agent 可以通过一组 Tool 来轮询状态：
-
-| Tool | 作用 |
-|------|------|
-| `StartROS2ActionTool` | 发 goal，返回 action handle |
-| `GetROS2ActionFeedbackTool` | 轮询 feedback（清空已读取） |
-| `GetROS2ActionResultTool` | 取结果 |
-| `CancelROS2ActionTool` | 取消正在进行的 action |
-
-结果存在模块级全局 dict（`actions.py:29-33`）：
-
-```python
-internal_action_id_mapping: Dict[str, str] = {}  # external_id → internal_handle
-action_results_store: Dict[str, Any] = {}        # handle → result
-action_feedbacks_store: Dict[str, List[Any]] = defaultdict(list)  # handle → [feedbacks]
+    Demo->>LG: LLM 决定调用 start_ros2_action
+    LG->>Tool: ToolRunner 执行 tool.invoke()
+    Tool->>Tool: action_id = uuid.uuid4()
+    Tool->>Mixin: connector.start_action(message, target,<br>on_feedback=partial(cb, action_id))
+    Mixin->>API: _actions_api.send_goal(action_name,<br>action_type, goal, feedback_callback, done_callback)
+    API->>API: handle = _generate_handle()
+    API->>API: action_goal = action_cls.Goal()
+    API->>ROS: ActionClient(node, action_cls, action_name)
+    ROS-->>API: ActionClient 创建成功
+    API->>ROS: send_goal_async(goal,<br>feedback_callback=_fan_out_feedback)
+    API->>API: get_future_result(send_goal_future)
+    Note over API: threading.Event 跨线程等待<br>不阻塞 ROS executor
+    API->>API: goal_handle.get_result_async()<br>.add_done_callback(done_callback)
+    API-->>Mixin: return accepted, handle
+    Mixin-->>Tool: return handle (string)
+    Tool->>Tool: internal_action_id_mapping[handle] = action_id
+    Tool-->>LG: "Action started with ID: abc-123"
+    LG-->>Demo: Tool 执行完成，返回给 LLM
 ```
 
-feedback 通过 `ThreadPoolExecutor` fan-out 到多个回调（`_fan_out_feedback`），其中一个回调把 feedback 存入 `action_feedbacks_store`。
+#### 模式 1 Feedback 到达时的异步分发
 
-### 模式 2：阻塞等待（导航专用）
+```mermaid
+sequenceDiagram
+    participant Nav2 as Nav2 Action Server
+    participant ROS as ROS 2 Executor<br>(独立线程)
+    participant API as action.py<br>_fan_out_feedback
+    participant GenCB as _generic_callback
+    participant Exec as _callback_executor<br>ThreadPoolExecutor
+    participant Store as 全局 dict<br>action_feedbacks_store
+    participant Tool as Tool 层<br>_generic_feedback_callback
 
-`NavigateToPoseBlockingTool`（`nav2_blocking.py:90-155`）则简单粗暴：
-
-```python
-result_response = action_client.send_goal(goal)  # 阻塞等待 goal accept + result
+    Nav2->>ROS: 发出 feedback 消息
+    ROS->>API: feedback_callback(feedback_msg)
+    API->>GenCB: _generic_callback(handle, fb)
+    GenCB->>GenCB: actions[handle].feedbacks.append(fb)
+    GenCB-->>API: 返回
+    API->>Exec: submit(safe_callback_wrapper,<br>external_feedback_callback, fb)
+    Exec-->>API: 立即返回 (异步)
+    Exec->>Exec: callback(deepcopy(fb))
+    Exec->>Tool: _generic_feedback_callback(action_id, fb)
+    Tool->>Store: action_feedbacks_store[action_id].append(fb)
 ```
 
-这里它直接调用同步的 `send_goal()`，整个 `_run()` 会 block 直到 action 完成才返回。适合"发完导航指令就等结果"的场景。
+#### 模式 2：阻塞模式 — 3 层调用链（跳过 Connector 和 API）
 
-### 关键设计：`get_future_result()` 替代 `spin_until_future_complete`
+```mermaid
+sequenceDiagram
+    participant LG as 2. LangGraph<br>ToolRunner
+    participant Tool as 3. Tool 层<br>NavigateToPoseBlockingTool
+    participant ROS as 5. ROS 2 底层<br>ActionClient
 
-`ros_async.py:25-43` 用 `threading.Event` 包装了 rclpy Future：
+    LG->>Tool: tool.invoke(x, y, z, yaw)
+    Tool->>Tool: connector.node (仅借 Node 实例)
+    Tool->>ROS: ActionClient(node, NavigateToPose, name)
+    Tool->>Tool: goal = NavigateToPose.Goal(pose=...)
+    Tool->>ROS: send_goal(goal)
+    Note over Tool,ROS: 同步调用，block 直到完成<br>不经过 action.py / action_mixin<br>不注册 feedback callback
+    ROS-->>Tool: result_response (含 status + result)
+    alt status == SUCCEEDED
+        Tool-->>LG: "Navigate to pose successful."
+    else status != SUCCEEDED
+        Tool->>Tool: _get_error_message(result_response)
+        Tool-->>LG: "Navigate to pose failed. Status: ..."
+    end
+```
+
+#### 调用层栈总览
+
+```mermaid
+graph TD
+    subgraph L1 ["1. Demo / 应用层"]
+        A["rosbot-xl-demo.py / AgentOrchestrator"]
+    end
+    subgraph L2 ["2. LangGraph 工作流层"]
+        B["ToolRunner._func()<br>解析 AIMessage.tool_calls"]
+    end
+    subgraph L3 ["3. Tool 层"]
+        C["StartROS2ActionTool<br>actions.py"]
+        D["NavigateToPoseBlockingTool<br>nav2_blocking.py"]
+    end
+    subgraph L4a ["4a. Connector 层"]
+        E["action_mixin.py<br>start_action()"]
+    end
+    subgraph L4b ["4b. API 层"]
+        F["action.py<br>ROS2ActionAPI"]
+    end
+    subgraph L5 ["5. ROS 2 底层"]
+        G["ActionClient + Executor"]
+    end
+
+    A --> B --> C --> E --> F --> G
+    A --> B --> D -.->|"借 connector.node"| G
+
+    style D fill:#fff3cd
+    style E fill:#d1ecf1
+    style F fill:#d1ecf1
+    style G fill:#d4edda
+    style C fill:#f8d7da
+```
+
+> 模式 1 走 5 层（Demo → LangGraph → Tool → Connector → API → ROS 2），模式 2 只走 3 层（Demo → LangGraph → Tool → ROS 2），**跳过 Connector 和 API 两层**。模式 2 的 `connector.node` 仅用于获取 `Node` 实例创建 `ActionClient`，不经过 connector 的任何 action 逻辑。
+
+### 模式 1：异步 fire-and-forget + LLM 主动轮询（通用模式）
+
+这是 `ROS2ActionToolkit`（`actions.py`）的实现，核心思路：**feedback 异步收集 → LLM 主动查询**。
+
+**发送 goal（`action.py:193-248`）：**
+
+1. `send_goal_async()` 立即返回 Future，不阻塞
+2. 存储 handle → 把 `goal_future`、`result_future`、`client_goal_handle`、`feedbacks[]` 存在 `self.actions[handle]` dict 里
+3. 注册 callback → feedback 回调自动收集到 `feedbacks[]` list；done 回调在 action 完成时触发
+4. 返回 handle string
+
+`_callback_executor`（`action.py:76`，`max_workers=10`）把每个 feedback **deepcopy** 后异步 fan-out 到两个存储。这样做是因为 ROS 2 executor 在独立线程运行（`base.py:162`），不能阻塞回调。
+
+**跨线程等待：`get_future_result()` 替代 `spin_until_future_complete`**
 
 ```python
 def get_future_result(future, timeout_sec=5.0):
@@ -124,16 +213,72 @@ def get_future_result(future, timeout_sec=5.0):
     return result
 ```
 
-这是因为 RAI 的 ROS 2 executor 在独立线程里运行（`base.py:162`），不能用 `rclpy.spin_until_future_complete`（它会 block 整个 executor 线程）。改用 `threading.Event` 实现跨线程等待。
+`rclpy.spin_until_future_complete` 会 block 整个 executor 线程，所以 RAI 用 `threading.Event` 实现跨线程等待（`ros_async.py:25-43`）。
 
-### 总结
+**LLM 轮询流程 — 5 个 Tool：**
 
-你的直觉是对的 — ROS 2 action 确实是连续的（goal → feedback stream → result）。RAI 的解法是：
+| Tool | 作用 |
+|------|------|
+| `StartROS2ActionTool` | 发 goal，返回 action ID |
+| `GetROS2ActionFeedbackTool` | 轮询 feedback（**取出并清空**，增量读取不重复） |
+| `GetROS2ActionResultTool` | 取结果（检查 `result_future.done()`） |
+| `CancelROS2ActionTool` | 取消正在进行的 action |
+| `GetROS2ActionIDsTool` | 列出所有已启动的 action ID |
 
-- 底层用 `send_goal_async` + `result_future.done()` 异步 API
-- 工具层拆解为 5 个 Tool（start/get_feedback/get_result/cancel/list），让 LLM agent 可以在 tool call 之间穿插推理
-- 导航场景则提供 blocking 版本简化使用
+**数据存在模块级全局 dict**（`actions.py:29-33`）：
 
+```python
+internal_action_id_mapping: Dict[str, str] = {}  # external_id → internal_handle
+action_results_store: Dict[str, Any] = {}        # handle → result
+action_feedbacks_store: Dict[str, List[Any]] = defaultdict(list)  # handle → [feedbacks]
+```
+
+LLM 的典型交互：
+
+```
+第 1 轮: start_ros2_action("navigate_to_pose", ...)
+         → "Action started with ID: abc-123"
+
+第 2 轮: get_ros2_action_feedback("abc-123")
+         → "[Feedback1, Feedback2]"  ← 取出并清空 buffer
+
+第 3 轮: get_ros2_action_feedback("abc-123")
+         → "[Feedback3, Feedback4]"  ← 新的 feedback
+
+第 4 轮: get_ros2_action_result("abc-123")
+         → "success"
+
+第 5 轮: "到达目标了！"
+```
+
+**优势**：LLM 在 tool call 之间可穿插推理、可并发管理多个 action。
+**劣势**：LLM 需主动轮询，增加 token 消耗和推理轮数。
+
+### 模式 2：阻塞等待（导航专用）
+
+`NavigateToPoseBlockingTool`（`nav2_blocking.py:90-155`）简单粗暴：
+
+```python
+result_response = action_client.send_goal(goal)  # 同步调用，block 直到完成
+```
+
+- **不注册 feedback callback** — 导航过程中的 feedback **全部丢弃**
+- Tool 的 `_run()` 阻塞，LangGraph 整个停在这一节点
+- 导航完成后返回 "Navigate to pose successful/failed"
+- LLM 拿到结果后才进入下一步推理
+
+`rosbot-xl-demo.py` 使用的就是这个模式。因为它的任务是串行的（导航→拍摄→分析），不需要监控导航进度。
+
+### 两种模式对比
+
+| 特性 | 异步轮询模式 | 阻塞模式 (demo 用) |
+|------|-------------|-------------------|
+| **feedback** | 收集到全局 dict，LLM 主动查询 | **丢弃** |
+| **LLM 控制权** | 每次 tool call 后可推理、可决策 | 导航期间 LLM **完全等待** |
+| **并发** | 可发多个 action，分别轮询 | 一次只能导航一个目标 |
+| **复杂性** | 5 个 Tool | 1 个 Tool |
+| **调用层数** | 5 层 (Demo → LangGraph → Tool → Connector → API → ROS) | 3 层 (Demo → LangGraph → Tool → ROS) |
+| **适用场景** | 需要监控进度、中途取消 | "导航到→再做事"的串行任务 |
 
 ## MegaMind 多智能体编排（agentic-mobile-manipulator 应用）
 
