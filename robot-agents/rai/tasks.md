@@ -308,5 +308,129 @@ demo 最终应该只剩：
 
 
 ## TODO18
-1. ruff 检查
-2. 短期记忆定期合并的测试
+1. ruff 检查(OK，未记录)
+2. 短期记忆定期合并的测试(OK，未记录)
+
+## task18
+分析问题:
+rai_whoami 模块是 rai 针对 RAG 知识库设计的，但现在还未应用在 @/home/jazzy/rai/examples/rosbot-xl-memory-demo.py。请你查看他的实现，你觉得 rai_whoami 实现得如何？如果要加到该 demo 中，实施方案是什么？
+
+RAG 主要问题:
+1. RAG 检索结果格式太粗糙
+    QueryDatabaseTool._run() 直接返回 str(self.vdb_client.similarity_search(...))。这会把 Document(...) 的 repr 扔给 LLM，缺少清晰的 source、score、片段格式。demo 中最好封装成更干净的输出。
+2. 构建向量库时没有显式 chunking
+    src/rai_whoami/rai_whoami/vector_db/faiss.py:42 直接 FAISS.from_documents(data.documentation, ...)。如果 PDF/MD 文档很长，检索粒度会很差。更标准的是先用 text splitter 切 chunk。
+3. 加载 FAISS 使用 allow_dangerous_deserialization=True
+    src/rai_whoami/rai_whoami/vector_db/faiss.py:66。本地可信文件可以接受，但不应加载不可信来源的 vector store。
+4. Embodiment 生成依赖 LLM，一次性拼接全部文档
+    src/rai_whoami/rai_whoami/processors/preprocessors/docs.py:31 把所有文档 page content 拼到一个 prompt。文档稍大就容易超 context，也缺少分阶段抽取/合并。
+5. 测试覆盖不足
+    我没有看到 rai_whoami 专门的测试目录。现在如果要接到 demo，建议先补最小测试，避免路径、FAISS 文件缺失、tool 输出格式这些问题运行时才暴露。
+
+建议方案:
+1. 先用 EmbodimentInfo.from_file 替换手写 JSON 解析。
+2. 增加 optional query_robot_docs tool。
+3. 包装/优化 QueryDatabaseTool 输出格式。
+4. 补测试。
+5. 后续再考虑把 vector DB 构建和路径配置放进 config.toml。
+
+疑问:
+1. 用 EmbodimentInfo.from_file 替换手写 JSON 解析，EmbodimentInfo 的来源是什么？这样会不会增加复杂程度，因为 embodiment_info 其实到底是手写的。
+2. query_robot_docs 问题:
+```txt
+我前面说的 query_robot_docs 不是要重新造一个检索系统，而是建议在 demo 里包装/重命名这个已有工具，让它更适合 agent 使用。
+
+原因是现在 QueryDatabaseTool 的默认定义比较泛：
+name = "query_database"
+description = "Query the database with a natural language query"
+
+这对 agent 来说语义不够明确。它不知道这个 database 是什么，什么时候该用，和 memory database 有什么区别。
+
+在 memory demo 里已经有长期记忆工具：
+save_fact
+save_location
+forget_memory
+
+如果再加一个叫 query_database 的工具，agent 可能会混淆：
+- 这是查用户记忆？
+- 查机器人说明书？
+- 查位置？
+- 查所有数据库？
+
+所以我的建议是：底层仍然用 rai_whoami.tools.QueryDatabaseTool，但在 demo 里把它配置成更明确的工具名和描述，例如：
+from rai_whoami.tools import QueryDatabaseTool
+
+query_robot_docs = QueryDatabaseTool(
+    root_dir=str(whoami_root),
+    embeddings_model=embeddings,
+    k=4,
+)
+
+query_robot_docs.name = "query_robot_docs"
+query_robot_docs.description = (
+    "Search the robot's static whoami documentation, including hardware specs, "
+    "sensors, capabilities, URDF/documentation details, and operating limits. "
+    "Use this for robot documentation questions, not for user preferences or "
+    "long-term conversation memory."
+)
+```
+3. rai_whoami 用的是什么文档加载器，功能如何？
+rai_whoami 用的是 LangChain Community 的文档加载器
+
+根据你之前的思路，完成 rai_whomi 集成的实际方案:
+1. embodiment_info 继续使用原有的手写 JSON 解析
+2. 增加 optional query_robot_docs tool。
+3. 包装/优化 QueryDatabaseTool 输出格式。
+4. 补测试。
+5. 把 vector DB 构建和路径配置放进 config.toml。
+
+
+## ques18-1
+rai_whoami 用的是什么文档加载器，功能如何？
+    rai_whoami 用的是 LangChain Community 的文档加载器
+
+不足:
+1. 没有 chunking(缺乏文本分块的功能)
+现在是 loader 加载出什么文档，就直接用于 FAISS。长 PDF、长 MD 检索粒度会偏粗，召回质量可能差。
+
+2. Markdown 只是普通文本
+.md 用 TextLoader，不会理解标题层级、代码块、表格结构。
+
+3. URDF/Xacro 只是纯文本
+没有解析 robot links/joints/sensors/transmissions 等结构化信息。LLM 可以读，但检索和抽取都不够稳。
+
+4. PDF 质量取决于 PyPDFLoader
+扫描版 PDF、复杂表格、多栏布局效果可能不好。
+
+5. 没有 metadata 强化
+检索结果没有很好保留/格式化 source、页码、章节等信息，后续给 agent 用时可解释性一般。
+
+按照你之前的思路，完成完善 rai_whomi 的方案:
+1. 构建 FAISS 前加 RecursiveCharacterTextSplitter
+2. 查询工具输出时格式化 source/page/content，不要直接返回 Document(...) 的字符串表示
+3. 使用 MarkdownHeaderTextSplitter+RecursiveCharacterTextSplitter 应对 Markdown
+
+NOTE: 在 task18 前完成
+
+
+## task19
+请跑通 /home/jazzy/rai/examples/rosbot-xl-memory-demo.py 的 rag 功能，rag 数据库可以先用你伪造的，重要的是功能本身的正确性。
+
+
+## task20
+我发现如果在项目文件夹下不新建 data/ 目录，sqlite 就会产生报错？
+
+@/home/jazzy/rai/examples/rosbot-xl-memory-demo.py 何时会去查询rag,是固定触发还是agent自己决定？
+- RAG 是可用工具，由 agent 自主触发；当前没有每轮固定 retrieval。
+
+我使用 @/home/jazzy/rai/examples/robotxl_whomi/documentation/man.md 和当前 config.yaml 验证 rag,但是显示"  File "/home/jazzy/
+rai/src/rai_whoami/rai_whoami/vector_db/faiss.py", line 109, in _build
+    raise ValueError("No documents found")
+ValueError: No documents found",什么原因?
+
+```
+simple_model = "gpt-5.4"
+complex_model = "gpt-5.4"
+embeddings_model = "gpt-5.4"
+base_url = "https://api.sudocode.chat/v1"
+```
