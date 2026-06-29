@@ -434,3 +434,487 @@ complex_model = "gpt-5.4"
 embeddings_model = "gpt-5.4"
 base_url = "https://api.sudocode.chat/v1"
 ```
+
+## task21
+@/home/jazzy/rai/examples/rosbot-xl-memory-demo.py 这个demo里有哪些功能是可以复用的,以抽象出来作为通用工具.先不要修改代码,先分析
+1. Whoami/RAG 工具创建
+
+    现在这些逻辑都在 demo 里：
+    - RobotDocsConfig
+    - RobotDocsQueryTool
+    - load_robot_docs_config
+    - _has_whoami_vector_db
+    - _create_robot_docs_tool
+
+    这些不应该属于 rosbot-xl-memory-demo.py。更适合放到 rai_whoami，例如：
+
+    from rai_whoami.tools import create_robot_docs_tool
+    from rai_whoami.config import load_whoami_config
+
+    理想 API：
+
+    tool = create_robot_docs_tool(
+        root_dir="examples/robotxl_whomi",
+        embeddings_model=embeddings,
+        build_vector_db=True,
+        k=4,
+        name="query_robot_docs",
+    )
+
+    这块复用价值最高，因为任何 agent 都可能需要“静态机器人文档 RAG”。
+
+2. Whoami 向量库检测/构建
+
+    当前 demo 自己判断：
+
+    generated/index.faiss
+    generated/index.pkl
+    generated/vdb_kwargs.json
+
+    这应该成为 rai_whoami 的能力，例如：
+
+    has_vector_db(root_dir)
+    ensure_vector_db(root_dir, embeddings_model=None)
+
+    这样 demo 不需要知道 FAISS 文件细节。
+
+3. Memory-aware agent factory
+
+    build_memory_agent() 现在做了很多通用事：
+    - 创建 LLM
+    - 创建 memory tools
+    - 注入 long-term memory
+    - 创建 create_memory_react_agent
+    - 可选加入 RAG tools
+
+    可以抽象成类似：
+
+    create_persistent_memory_agent(
+        memory_mgr=memory_mgr,
+        llm=llm,
+        tools=[...],
+        system_prompt_builder=...,
+        namespace="default",
+        user_id="default",
+    )
+
+    或更具体一点：
+
+    create_memory_agent_with_tools(
+        memory_mgr,
+        llm,
+        base_tools,
+        system_prompt_builder,
+        user_id,
+        namespace,
+    )
+
+    这样 demo 只负责提供 ROSBot 的 embodiment/prompt，而不是拼装 memory graph。
+
+4. System prompt section builder
+
+    当前 prompt 里混了四类内容：
+    - embodiment
+    - long-term memory
+    - memory tool 使用规则
+    - robot docs RAG 使用规则
+
+    可以抽象成小工具：
+
+    render_memory_system_prompt(
+        embodiment=...,
+        long_term_memory=...,
+        enable_robot_docs=True,
+    )
+
+    或更灵活：
+
+    PromptSectionBuilder()
+        .add_embodiment(...)
+        .add_long_term_memory(...)
+        .add_memory_tool_instructions()
+        .add_robot_docs_instructions()
+
+    这样不同 demo 可以共享规则文本，减少 prompt 漂移。
+
+已经部分抽象，但还可以继续收口
+
+5. Streamlit memory UI
+
+    现在 render_memory_sidebar() 和 render_chat_messages_with_tools() 已经在 rai.frontend.memory_streamlit 里，这是好的。
+
+    demo 里仍有一些可复用 UI 逻辑：
+    - sidebar 里显示 tool calls
+    - st.chat_input() 后构造 HumanMessage
+    - 调用 streamlit_invoke
+    - 把 checkpointed result 写回 st.session_state
+
+    可以抽成：
+
+    run_memory_chat_turn(
+        graph,
+        sidebar_state,
+        context,
+    )
+
+    或：
+
+    render_memory_chat_app(...)
+
+    不过这个优先级低于 RAG/tool factory，因为 Streamlit app 通常会有定制需求。
+
+6. MemoryManager 初始化
+
+    initialize_memory_mgr() 里有通用逻辑：
+    - 读取 memory config
+    - 尝试加载 embeddings
+    - embeddings 失败时降级
+    - start() / setup()
+
+    但它现在混了 st.error / st.warning / st.stop()，所以不能直接复用到非 Streamlit 环境。
+
+    可以拆成纯函数：
+
+    create_memory_manager_from_config(config, embeddings=None)
+
+    Streamlit 层只负责展示错误。
+
+不建议抽象，保留在 demo 里
+
+- EMBEDDING_PATH
+- _welcome_message()
+- ROSBot XL 的具体 system prompt 语气
+- “You are a ROSBot XL robot assistant...” 这类角色设定
+- demo 的 Streamlit title/page icon
+- 是否加入 WaitForSecondsTool()
+
+这些是 demo/机器人特定逻辑，抽象后反而会让通用层带上 ROSBot 假设。
+
+推荐抽象顺序
+
+1. 先把 RAG 相关移到 rai_whoami：
+    - WhoamiConfig
+    - load_whoami_config
+    - has_vector_db
+    - ensure_vector_db
+    - create_robot_docs_tool
+
+2. 再把 memory agent 拼装逻辑移到 rai.memory：
+    - 通用 memory tools 创建
+    - long-term memory prompt injection
+    - optional extra tools
+
+3. 最后再考虑 Streamlit chat loop 抽象。
+
+
+## todo22
+连续工具调用失败的处理
+已合并到 task23 完成
+
+
+## task23
+分析出错过程(该过程两次复现):
+1. 我和 agent 说: "你好，你肥吗？"
+2. agent 调用  query_robot_docs，tool 返回:
+"Result 1
+Source: examples/rosbotxl_whoami/documentation/man.md
+Page: unknown
+Content:
+rosbot-xl 参数
+- 相机参数
+相机大小为 114514 * 1919"
+3. agent 不再输出，像卡住一样
+
+完成你的思路:
+做通用 guard，但默认策略保守，只限制明显异常的情况。然后给 query_robot_docs、memory tools 这种容易重复调用的工具加更严格 policy。这样既解决循环卡死，也不会破坏正常的多工具任务。
+
+
+## task24
+在 @/home/jazzy/rai/examples/rosbot-xl-memory-demo.py 的基础上，将 @/home/jazzy/rai/examples/rosbot-xl-demo.py 的工具添加进来(除了 rai_perception 相关)。需要修改哪些内容？
+
+
+## task25
+openai 接口修改
+
+按照你的思路，实现实际方案:
+```yaml
+[openai]
+base_url = "http://localhost:8000/v1"
+api_key = "EMPTY"
+model = "default-chat-model"
+
+[openai.vlm]
+base_url = "http://10.0.88.103:11451"
+api_key = "EMPTY"
+model = "qwen27b-mtp"
+
+[openai.embeddings]
+base_url = "http://10.0.88.103:11452"
+api_key = "EMPTY"
+model = "nomic"
+```
+并修改 @/home/jazzy/rai/src/rai_core/rai/frontend/configurator.py，使其和新配置保持一致
+
+
+## task26
+我使用 configurator.py 尝试，模型配置为:
+```
+[vendor]
+simple_model = "openai.vlm"
+complex_model = "openai.vlm"
+embeddings_model = "openai.embeddings"
+```
+，但测试配置时出现:
+```
+step_renderer[st.session_state.current_step]()
+File "/home/jazzy/rai/src/rai_core/rai/frontend/configurator.py", line 1032, in review_and_save
+test_results[name] = test()
+File "/home/jazzy/rai/src/rai_core/rai/frontend/configurator.py", line 987, in test_recording_device
+index = [device["name"] for device in devices].index(device_name)
+ValueError: 'default' is not in list
+```
+
+
+## task27
+错误出现在: 我运行" uv run streamlit run examples/rosbot-xl-memory-demo.py "页面,就产生 openai_api_key 的错误
+
+根据你的思路，完成该方案:
+1. OpenAIEmbeddings 初始化继续使用 endpoint 自己的 api_key。
+2. return_kwargs=True 时也返回同一个 api_key。
+3. 只对 vendor.startswith("openai") 的 embeddings kwargs 增加 api_key。
+4. 如果 api_key 为空，则可以不写入，继续让 SDK 按环境变量兜底。
+5. 测试补一条：openai.embeddings endpoint 在没有 OPENAI_API_KEY 环境变量时，通过 return_kwargs=True 返回的 kwargs 可以重新构造 OpenAIEmbeddings。
+
+
+## task28
+@/home/jazzy/rai/examples/rosbot-xl-memory-demo.py @/home/jazzy/rai/examples/rosbotxl_whoami/documentation/man.md 现在我是用 robot-xl-memory-demo 测试 RAG 检索能力,但是文档太简单了.请建立更详细复杂的文档,并测试当前demo的 RAG 检索能力.
+
+
+结果:
+我在 examples/rosbotxl_whoami/documentation/man.md 建了更完整的 ROSBot XL 文档，内容包括：
+
+- 机器人尺寸、重量、电池、续航
+- RGB-D 相机、雷达、IMU、里程计
+- Nav2 导航坐标系与目标点配置
+- ROS 2 topics / frames / actions
+- memory demo 可用工具说明
+- 运行限制、安全规则、故障排查
+- 常见问题速答
+
+同时重建了本地 RAG 向量库：
+
+examples/rosbotxl_whoami/generated/index.faiss
+examples/rosbotxl_whoami/generated/index.pkl
+examples/rosbotxl_whoami/generated/vdb_kwargs.json
+
+构建结果：
+
+Document chars: 6074
+Chunks: 39
+Max chunk chars: 238
+Index size: 39
+
+注意：examples/rosbotxl_whoami/documentation/man.md 和 generated/ 当前被 .gitignore 忽略，所以不会出现在 git status 里。现在 git
+status 只显示 config.toml 有已有修改。
+
+测试结论：
+
+- “尺寸/重量”检索可用，能返回 435 mm、330 mm、310 mm、约 5.2 kg。
+- “相机 topic/分辨率/帧率”检索可用，能返回 /camera/camera/color/image_raw、1280 x 720、30 FPS。
+- “导航坐标系 / navigate_to_pose”检索基本可用，正确结果在前几名。
+- “当前位置应该查文档还是实时工具”可用，能返回 get_ros2_robot_position / get_current_pose。
+- “玻璃门/反光表面”自然语言 query 排序仍不稳定；关键词式 query 能检到正确段落，但普通口语问法容易被错误章节挤到前面。
+
+这个测试说明：当前 demo 的 RAG 链路本身能工作，Markdown 分块和 FAISS 索引也能正常构建；主要弱点是当前 nomic embedding 对中文自然
+问句的排序不够稳定，后续如果要更可靠，建议加 hybrid/BM25 检索或 reranker。
+
+
+## task29
+这是我本地部署的大模型:
+```
+model_id: str = "qwen27b-mtp",
+base_url: str = "http://10.0.20.16:11451/v1/",
+api_key: str = "empty",
+```
+我想测试其视觉检测能力，数据集在 /home/jazzy/study/Qwen3-VL/demo/测试数据，分别是安全穿戴和跑冒滴漏测试。请在 demo/ 建立测试脚本，测试其视觉检测能力，并输出检测结果、检测事件等到某一文件。完成后先测试前面几张，以验证测试脚本是否正确。
+
+
+## task30
+当前 rai 集成的 tools/skill 有哪些，我想基于 @/home/jazzy/task_ws/src/gimbal_stub_hub 添加一个"简单云台拍照"工具，该工具会进行云台归中，然后拍照。
+可以在 gimbal_stub_hub 添加一个新的消息接口(该消息类似来自 ros2 官方)，完成所述功能。
+你的实现思路如何，这个 skill 是否符合规范？先讨论，不要修改源码.
+
+实现方案:
+1. 先在 gimbal_stub_hub 增加一个“归中后拍照”的 action。
+2. 再在 RAI 里加一个对应的 BaseROS2Tool 包装。
+3. 最后在 agent prompt 里把它描述成“简单云台拍照工具”，让 agent 直接调用。
+该方案中“归中后拍照”的 action 能用官方 ros2 消息吗？先讨论，不要修改源码.
+
+问题:
+1. 我的意思是，"归中后拍照" agent 不管拍照模块具体如何实现，而只管外部暴露的接口.
+2. agent 至少要从这次拍照 action 中获取图片路径/图片数据，action 用什么比较好
+
+问题:
+1. 如果新增一个 action，比如 CaptureCenteredPhoto.action，会破坏 rai 原先的依赖吗？是否在 rai 基础上新建一个包，类似 @/home/jazzy/rai/examples/rosbot-xl-memory-demo.py(但和 demo 不同，是新建一个单独的包)，对 rai 本身的修改只涉及 agent 本身的基础功能.这样设计会不会更合理些，客观分析，不要有主观偏向.
+
+2. 你理解得不对，可能是我没有表述清楚. 我的意思是这个新 demo 是针对巡检设计的，其依赖 rai 和新建 CaptureCenteredPhoto.action（这个 action 可以放在 inspection_interfaces 下），这个 demo 本身就算一个 uv 项目. 这样设计会不会更合理些，客观分析，不要有主观偏向.
+
+
+## task31
+rai_inspection_agent 下 CenterGimbalAndCaptureTool 这个 tool，只会在页面显示图片地址; 但应该类似 rai/GetROS2ImageConfiguredTool，其能够直接在页面显示出拍摄的图片。评估一下实施可能性和合理性，先讨论，不要修改源码
+
+完成你提供的方案:
+CenterGimbalAndCaptureTool 目前是在巡检 agent 项目里自己封装的，不是 RAI 核心通用工具。
+所以最合适的做法不是把它做成纯路径输出，而是让它：
+1. 继续返回路径字符串用于审计/日志
+2. 同时附带 artifact.images
+3. 如果有多张图，就都放进 artifact
+
+
+## task32
+查看 rai_inspection_agent 的提示词工程(具体提示词部分)，我感觉实现有些问题(冗余)，请进行评估，先讨论，不要修改源码
+
+完成你觉得更合理的方向是：
+- base prompt 只保留角色、任务目标、embodiment
+- 单独一个“硬规则”段，只放歧义消解，例如：
+    - 用户说“拍巡检照片” -> center_gimbal_and_capture
+    - 用户说“播放检测到气体泄漏” -> 对应喇叭/告警工具
+
+- 单独一个“限制”段，只说明什么不能做、什么没有
+- 不再在多个 section 里重复“你能导航/你能看图”这种基础能力
+
+
+你这块改得有些问题,先不要改. 先改新问题: 我使用 CenterGimbalAndCaptureTool 工具发现问题: 图像显示了一会,就直接消失.
+
+修法:
+在回放逻辑里支持渲染 HumanMultimodalMessage.images. 如果这个修复是通用修复，请使用通用修复方式(rai中修复); 如果是 rai_inspection_agent 的问题，请单独修复
+
+
+完成你建议的修复方向，并测试通过：
+- 在回放逻辑里补一个 HumanMultimodalMessage 分支
+- 直接渲染 msg.content 之外的 msg.images
+- 最好抽一个通用 helper，给两个 Streamlit 入口共用
+
+
+你刚才添加的 multimodal 修复有问题，页面显示过往图片会使用:
+```
+Image returned by a tool call 8yfwPIfXMe5VC2dbDAdMR2vgHpvncOc7
+```
+这样看起来很割裂。工具调用获取的图片应该在工具显示栏，如: "Tool: center_gimbal_and_capture".
+请进行评估，先讨论，不要修改源码
+
+
+完成你建议的方案，并测试通过：
+- 回放层识别 HumanMultimodalMessage
+- 不直接渲染成 user message
+- 改为把它和对应的 ToolMessage 绑定，放进 Tool: ... 的 expander 里显示图片
+
+
+## task33
+我在 cat@10.0.40.137(密码: cat) 上运行 
+```
+uv run streamlit run rai_inspection_agent/app.py
+```
+rai/rai_inspection_agent 均在 ~ 下;
+tool 调用的图像不显示，请分析原因，先讨论，不要修改源码
+
+
+这次 tool result 的 image_uri 在 cat 主机上确实真实存在，直接在 cat@10.0.40.137(密码: cat) 修复 rai 的这个问题，并测试通过，可以使用 uv run streamlit run rai_inspection_agent/app.py 查看你的修复结果
+
+
+Sorry，我让你访问的主机错误了，应该是 cat@10.0.40.85(密码: cat)，137 主机上不是最新提交，请重新修复
+
+
+## task34
+你这个巡检场景里，center_gimbal_and_capture 的图通常既有展示价值，也可能有后续判断价值，所以现在这种做法能工作，但如果图片较大或频繁拍照，后面最好拆成两层：
+- 主上下文只保摘要或引用
+- 原图放外部 artifact 存储
+
+问题:
+1. "artifact 存储"指什么，他和现在 checkpoints.db、store.db 的关系是什么？
+2. 但我在远程 cat@10.0.40.85(密码: cat) 并没有看到 artifact_database.pkl，但当前页面确实能渲染"云台归中拍照"的图片，请为我指明他的远程路径
+3. 那么 artifact_database.pkl 体现在当前项目的哪里？
+- artifact_database.pkl 更像是一个旧的/旁路的附件缓存实现，不是现在巡检页面的主存储。
+
+完成你所说的更合理的分层，直接在远程 cat@10.0.40.85(密码: cat) 实现并测试通过：
+- 上下文里只保留“模型需要理解的最小图像信息”
+- 原图放到独立 artifact 存储
+- checkpoint 里只存引用或摘要
+
+完成建议放在 data/artifacts/ 目录，而不是单个 pkl 文件，直接在远程 cat@10.0.40.85(密码: cat) 实现并测试通过：
+- 每个 tool_call_id 一个目录
+- 原图单独文件
+- 元数据单独索引文件
+
+问题:
+1. 你改了之后，agent交互中显示:
+```
+我无法直接"看到"或分析图像内容。虽然拍摄成功并保存了图像到 /home/cat/Workspace/task_ws/captured_images/req_20260626_140445_011/capture_raw_iter1.jpg，但我没有图像处理或计算机视觉工具来分析这张照片中的具体场景、物体或环境细节。
+```
+现在 agent 无法获取图像数据了吗？那放在 artifacts 中有什么意义？告诉我现在的链路。
+
+2. 当前最新的实现存在疑问: 
+为了获取图像数据，是做成两个工具，那么为什么不只使用 center_gimbal_and_capture 工具完成？你单独拆出一个新工具的目的是什么？
+
+3. 我希望能在 rai 的 @/home/jazzy/rai/examples/rosbot-xl-memory-demo.py 页面中输入对话框的左边加入一个加号按钮，其可以上传图片。说明：
+- 图片不会存储在 checkpoint 中，但 agent 可以分析当前上传的图片内容。
+- 做成通用的方式，不只是针对 xl-mermory-demo，还要能够复用到 inspection_rai_agent 等其他项目和模块  
+评估实施方案，先讨论，不要修改源码
+
+问题3的实施方案：
+- 新增通用 helper，例如 rai.frontend.chat_input：
+    - render_multimodal_chat_input(...)
+    - 返回 text、images_base64、uploaded_file_names
+    - 内部用 st.chat_input(accept_file=...)
+
+- 改 rai.frontend.memory_streamlit.render_memory_chat_input()：
+    - 使用新 helper
+    - checkpoint 输入仍是 HumanMessage
+    - 临时图片通过 MemoryAgentContext 或 RunnableConfig.configurable 传入 graph
+
+- 改 rai.memory.graph.MemoryAgentContext：
+    - 增加可选 transient_images
+    - run_react() 中只对 inner agent 注入 HumanMultimodalMessage
+
+- 改 rai.frontend.streamlit.run_streamlit_app()：
+    - 同样用新 helper
+    - session history 保存文本
+    - 当前 invoke 临时使用 multimodal 最新消息
+
+- rosbot-xl-memory-demo.py 和 inspection_rai_agent：
+    - 理想情况下无需业务代码感知图片上传
+    - 它们继续调用 render_memory_chat_input(...)
+    - 自动获得上传图片能力
+
+5. 当前 streamlit 页面确实可以输入图片，但存在以下问题:
+- 在输入框里图片无法放大预览看
+- 图片输入给 agent 后，页面里只有文字如: "请查看这张图片"，但具体图片内容无法看到  
+评估实施方案，先讨论，不要修改源码
+
+
+问题5实施方案：
+- 默认：session_state 保存上传图片，满足当前页面显示和放大。
+- 可配置：启用 artifact backend 后，把上传图片保存到 data/artifacts/user_uploads/...，用于可回放审计。
+1. 在 rai.frontend.chat_input 的 ChatInputSubmission 增加附件元数据：
+    - images
+    - file_names
+    - mime_types
+    - attachment_id
+2. 在 memory_streamlit.render_memory_chat_input() 和普通 run_streamlit_app() 中：
+    - checkpoint 仍只保存 HumanMessage(text)
+    - 当前 invoke 仍临时传 HumanMultimodalMessage
+    - 同时把图片保存到 UI attachment store
+3. 在 render_chat_messages_with_tools() / run_streamlit_app() 回放用户消息时：
+    - 渲染文字
+    - 如果该 turn 有上传图片附件，显示缩略图
+    - 用 st.expander 或 st.dialog 提供大图预览
+4. 测试重点：
+    - checkpoint 中没有 base64 图片
+    - LLM 当前调用能收到 HumanMultimodalMessage.images
+    - 页面渲染用户消息时能拿到附件并调用 st.image
+    - rerun 后 session_state 中的附件仍能显示
+
+
+问题:
+1. 你修改之后，我在 rai_inspection_agent 上传图片直接显示"很抱歉，我目前无法分析这张图片。"并且也无法在输入时放大预览图片
+
