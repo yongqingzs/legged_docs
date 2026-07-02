@@ -918,3 +918,487 @@ Sorry，我让你访问的主机错误了，应该是 cat@10.0.40.85(密码: cat
 问题:
 1. 你修改之后，我在 rai_inspection_agent 上传图片直接显示"很抱歉，我目前无法分析这张图片。"并且也无法在输入时放大预览图片
 
+
+## task35
+当前 rai_inspection_agent 中 RAG 的 demo，测试 RAG：
+1. 询问 "告诉我机器人的机身尺寸"，
+2. 这是具体的知识库文档: @/home/jazzy/task_ws/src/rai_inspection_agent/data/rosbotxl_whoami/documentation/man.md
+3. 理论上这都不是模糊语义搜索，但是 agent 无法搜索到
+问题出在哪里？分析原因，先讨论，不要修改源码
+
+
+我看到的几个直接原因：
+1. 纯向量检索对中文短查询表现很差
+    查询 机身尺寸、告诉我机器人的机身尺寸 时，embedding 把它排到了导航、相机 topic、工具说明附近，说明这个 embedding 模型或当前 FAISS 距离策略对中文短词不可靠。
+2. k=4 太小
+    正确 chunk 没进 top-4，agent 就没有机会回答正确内容。即使文档里有，也等于没检索到。
+3. 没有关键词 fallback / hybrid search
+    对“机身尺寸”“底盘长度”这种明确词，应该先做关键词/BM25/标题匹配，至少作为 fallback。现在没有。
+4. 文档里有“5.3 文档检索工具”这种 meta 内容
+    它包含“底盘尺寸、相机 topic、雷达范围...”等词，容易干扰检索。虽然这次它也没进 top-4，但它会污染向量空间，长期看不适合作为机器人知识库正文的一部分。
+5. FAISS 默认相似度策略可能不适合当前 embedding
+    当前用的是 openai.embeddings-qwen3e，维度 1024。LangChain FAISS 默认是 L2 距离。如果该 embedding 更适合 cosine / normalized vectors，排序会明显变差。
+所以问题不在 man.md 路径，也不在文档是否被加载。证据是 index.pkl 里能看到 chunk_index=2 的 1.1 机身尺寸与重量。问题是检索层没有把它召回。
+
+
+## task36
+当前 rai 是否是直接使用 FAISS 默认相似度策略，而无法通过 config.toml 配置。我需要做成外部可配置的通用方式，并可以在 rai_inspection_agent 中复用。评估方案，先讨论，不要修改源码
+
+我建议的通用方案:
+在 rai_whoami 增加一个可配置的 retrieval 层，而不是只为 rai_inspection_agent 特判。rai_inspection_agent 继续通过自己的 config.toml 复用。
+
+建议配置结构类似：
+```yaml
+[whoami]
+enabled = true
+root_dir = "data/rosbotxl_whoami"
+build_vector_db = true
+k = 4
+
+[whoami.retrieval]
+strategy = "hybrid"          # "vector" | "keyword" | "hybrid"
+vector_k = 8
+keyword_k = 8
+final_k = 4
+score_threshold = 0.0
+normalize_embeddings = true
+distance_strategy = "cosine" # "l2" | "cosine" | "inner_product"
+rerank = "none"              # reserved: "none" | "llm" | "cross_encoder"
+```
+实现分层建议
+1. 配置层
+    - 扩展 WhoamiConfig
+    - 增加 WhoamiRetrievalConfig
+    - 保持兼容：如果没有 [whoami.retrieval]，继续走当前默认行为
+2. 索引构建层
+    - FAISSBuilder 支持：
+        - normalize_embeddings
+        - distance_strategy
+    - 构建时把这些参数写进 generated/vdb_kwargs.json
+    - 加载时校验当前配置和索引配置是否一致，不一致时提示 rebuild
+3. 查询层
+    - RobotDocsQueryTool 不直接等同于纯 FAISS query
+    - 抽象成 retrieval strategy：
+        - vector: 当前 FAISS 逻辑
+        - keyword: markdown 文档关键词/BM25
+        - hybrid: vector + keyword 合并去重，再按规则排序
+4. 关键词 fallback
+    对你的问题这种“机身尺寸”非常重要。即使 vector 排错，关键词命中标题 1.1 机身尺寸与重量 也应该能兜底。
+    最小可行逻辑：
+    - 加载 documentation/*.md
+    - 按 markdown chunk 切分
+    - 对 query 做简单中文 token/substring 匹配
+    - 标题命中加权高于正文命中
+    - 精确短语命中高于分散词命中
+5. 工具输出层
+    query_robot_docs 返回时最好带来源和检索类型，例如：
+    ```
+    Result 1
+    Retrieval: keyword
+    Source: ...
+    Header: 1.1 机身尺寸与重量
+    Content: ...
+    ```
+这样调试时能知道是 vector 命中的还是 keyword 命中的。
+
+按照你的方案实施，但需要注意像 distance_strategy 这种一定要配置化，因为根据我收集的资料，qwen3e(Qwen/Qwen3-Embedding-0.6B-GGUF)使用"余弦相似度（Cosine Similarity） 或 归一化后的点积（Inner Product）"作为度量衡。
+
+## explain36
+这段配置控制 rai_whoami 的 RAG 检索方式，放在 config.toml 的：
+```yaml
+[whoami.retrieval]
+strategy = "hybrid"
+vector_k = 8
+keyword_k = 8
+final_k = 4
+normalize_embeddings = true
+distance_strategy = "inner_product"
+```
+参数说明
+1. strategy
+可选：
+```
+"vector"   # 只用向量相似度检索
+"keyword"  # 只用关键词/子串检索
+"hybrid"   # 先关键词，再向量，合并去重
+```
+建议：
+- 通用英文语义检索：vector
+- 中文技术手册、型号、尺寸、参数、章节标题：hybrid
+- 你现在这个 ROSBotXL 文档场景：建议 hybrid
+
+2. vector_k
+向量检索阶段最多取多少条候选。
+```
+vector_k = 8
+```
+数值越大，召回越高，但噪声也可能更多。最终给 agent 的数量仍由 final_k 控制。
+建议：
+- 小文档：4-8
+- 中等文档：8-16
+- 当前建议：8
+
+3. keyword_k
+关键词检索阶段最多取多少条候选，只在 strategy = "keyword" 或 "hybrid" 时有意义。
+```
+keyword_k = 8
+```
+它适合补齐“机身尺寸”“底盘宽度”“电池容量”这种明确词面命中的问题。
+建议：
+- 参数手册类文档：8
+- 文档很多时：10-20
+```
+final_k
+```
+最终返回给 LLM 的文档片段数量。
+```
+final_k = 4
+```
+这个值直接影响上下文长度和回答质量。太小可能漏召回，太大可能把无关内容塞进上下文。
+建议：
+- 普通问答：3-5
+- 当前建议：4
+- 如果回答经常缺依据，可以调到 6
+
+4. normalize_embeddings
+是否对 embedding 向量做 L2 归一化。
+```
+normalize_embeddings = true
+```
+对 Qwen3 Embedding 这类推荐使用 cosine similarity / normalized inner product 的模型，建议开启。
+建议：
+- distance_strategy = "inner_product" 时：通常设为 true
+- distance_strategy = "cosine" 时：通常也可以设为 true
+- distance_strategy = "l2" 时：一般保持 false，除非明确想用归一化后的欧氏距离
+
+5. distance_strategy
+FAISS 向量距离策略。
+可选：
+```
+"l2"             # 欧氏距离，默认值
+"cosine"         # 余弦距离/相似度策略
+"inner_product"  # 最大内积
+```
+建议：
+- OpenAI / Qwen / BGE 等现代 embedding：优先 "inner_product" + normalize_embeddings = true
+- 如果模型文档明确推荐 cosine：可用 "cosine" + normalize_embeddings = true
+- 老配置兼容或没有模型建议时："l2"
+
+你当前这个配置是合理的：
+```yaml
+[whoami.retrieval]
+strategy = "hybrid"
+vector_k = 8
+keyword_k = 8
+final_k = 4
+normalize_embeddings = true
+distance_strategy = "inner_product"
+```
+它的含义是：先做关键词召回，再做 Qwen3 embedding 的归一化内积向量召回，合并去重后最多给 agent 4 条结果。对“告诉我机器人的机身尺寸”这种中文手册问答，比纯向量检索稳很多。
+
+
+说明:
+- 混合检索流程:
+1. 先取 keyword_k 条关键词结果
+2. 再取 vector_k 条向量结果
+3. 按顺序拼接：关键词结果在前，向量结果在后
+4. 按 (source, chunk_index) 去重
+5. 最后截断到 final_k
+
+
+## task37
+OK，你干的不错。但我发现改为"strategy = "vector""，rai_inspection_agent 就无法索引到"机身尺寸多少"相关内容。我怀疑是以下可能:
+1. 配置项未配置对
+2. 模型能力本身有问题
+3. 对中文检索语句效果差
+请排查，并告诉我真正的原因
+
+
+## task38
+@/home/jazzy/task_ws/src/rai_inspection_agent/demo/embedding1.py 的 RAG 检索结果其实挺对的("机身尺寸是多少？"，正确回答在第1条)，但 通过 rai_whoami 实现的向量检索却完全错误("机身尺寸是多少？"，正确回答不在前8条)。这两种实现方式有什么差异？为什么会导致完全不同的结果。
+
+核心差异是：demo 在做“检索任务专用 embedding”，rai_whoami 在做“裸文本 embedding”。
+最关键的一点在这里：
+- embedding1.py 用的是
+    - 文档：search_document: ...
+    - 查询：search_query: ...
+- rai_whoami 当前 vector 检索里，传的是原始 query 和原始 chunk，没有这些前缀。
+这会直接导致结果完全不同。对 qwen3e 这类检索向量模型来说，这种前缀不是装饰，而是检索指令的一部分。它会把“这是文档” 和 “这是查询”这两类文本投到更适合匹配的空间里。没有前缀时，短中文问句比如“机身尺寸是多少？”很容易被语义拉偏。
+另外再补两点：
+1. demo/embedding1.py 是现场重新算 embedding 再排序，没有经过 FAISS 持久化索引加载链路。
+2. rai_whoami 是先建索引，再加载索引，再检索。如果构建时和查询时的文本预处理不一致，差异会被放大。
+但你这个案例里，主因不是 FAISS，也不是距离策略，而是：
+- demo 使用了 search_query/search_document 前缀
+- rai_whoami 没用这些前缀
+所以 demo 排第 1，而 rai_whoami 前 8 都不对，是完全合理的。
+结论很直接：
+如果你希望 rai_whoami 的纯向量检索接近 demo 结果，应该让它和 demo 保持同一套 embedding 约定，也就是 query/doc 都加对应前缀。否则两者不是同一个检索空间。
+
+
+问题:
+1. 你测试发现目标 chunk 还是在大约第 20 名，得出结论“机身尺寸是多少？”这个精确 query，纯 vector 还是不够可靠"。
+你的推定完全是不严谨的，@/home/jazzy/task_ws/src/rai_inspection_agent/demo/embedding1.py 的 RAG 检索结果其实挺对的("机身尺寸是多少？"，正确回答在第1条);
+但是这两种方式使用的模型都是一致的;
+你如何解释？
+
+
+## explain38
+调用链是这样的：
+1. 入口在 inspection agent
+    - [app.py:143-176](/home/jazzy/task_ws/src/rai_inspection_agent/rai_inspection_agent/app.py:143)
+    - build_memory_agent() 里调用 create_robot_docs_tool()
+    - extra_tools=[robot_docs_tool] 把 RAG 工具注入 agent
+2. whoami 工具构造
+    - [robot_docs.py:72-101](/home/jazzy/rai/src/rai_whoami/rai_whoami/tools/robot_docs.py:72)
+    - create_robot_docs_tool() 先 ensure_vector_db()
+    - 再返回 RobotDocsQueryTool(...)
+3. vector DB 工具
+    - [vector_db.py:54-139](/home/jazzy/rai/src/rai_whoami/rai_whoami/tools/vector_db.py:54)
+    - QueryDatabaseTool._run() -> _retrieve()
+    - strategy == "vector" 时走 _vector_search()
+    - _vector_search() 调 self.vdb_client.similarity_search(query, k=...)
+4. FAISS 加载
+    - [faiss.py:226-259](/home/jazzy/rai/src/rai_whoami/rai_whoami/vector_db/faiss.py:226)
+    - get_faiss_client() 读取 generated/vdb_kwargs.json
+    - FAISS.load_local(...) 加载 index.faiss 和 index.pkl
+5. FAISS 构建
+    - [faiss.py:147-211](/home/jazzy/rai/src/rai_whoami/rai_whoami/vector_db/faiss.py:147)
+    - FAISSBuilder._build()：
+        - split_documents_for_vector_db() 切文档
+        - FAISS.from_documents(...) 建索引
+        - db.save_local(...) 落盘
+6. embedding 模型来源
+    - [model_initialization.py:319-352](/home/jazzy/rai/src/rai_core/rai/initialization/model_initialization.py:319)
+    - get_embeddings_model() 读 config.toml
+    - openai 路径下返回 OpenAIEmbeddings(...)
+
+当前你最关心的“检索字符串怎么走”在这里：
+- app.py 把 query_robot_docs 放进 agent
+- agent 决定是否调用工具
+- 调用后进入 QueryDatabaseTool._run()
+- _vector_search() 把 query 交给 FAISS.similarity_search()
+- FAISS 读取已建好的 generated/index.faiss
+
+
+## explain39
+区别很直接：
+- embed_documents(texts)
+    - 输入：一批文档文本
+    - 用途：建库/入库时给每个 chunk 算向量
+    - 这里会走 FAISS.from_documents(...)，本质是在做索引向量化
+- embed_query(text)
+    - 输入：单条查询文本
+    - 用途：检索时把用户问题转成向量，再去和索引里的文档向量比相似度
+
+在你这个仓库里，实际用法是：
+- 建索引时
+[faiss.py:181-193](/home/jazzy/rai/src/rai_whoami/rai_whoami/vector_db/faiss.py:181)
+FAISS.from_documents(documents, self.embedding, ...)
+这里会触发 embed_documents()
+- 查索引时
+[vector_db.py:110-118](/home/jazzy/rai/src/rai_whoami/rai_whoami/tools/vector_db.py:110)
+self.vdb_client.similarity_search(query, k=...)
+这里会触发 embed_query()
+
+你现在加的前缀也是按这个分开的：
+- embed_documents -> search_document: ...
+- embed_query -> search_query: ...
+
+
+## task40
+问题:
+当前 rai 实现中，faiss 好像是每次调用 query_docs 工具，都重新生成？是这样吗，这样是否合理？
+- 不是每次调用 query_robot_docs 工具都重新生成 FAISS，只有创建时才调用
+
+当前 agent 存在一个问题，之前设计了重复调用工具会拦截的机制，但存在一些情况:
+1. 用户希望了解机器人能力，agent 调用 query_robot_docs 查询
+```
+{
+  "query": "机器人名称、硬件规格、传感器、能力、功能介绍"
+}
+```
+agent 返回结果，结果正确
+
+2. agent 想重复调用，以获取更多信息(这是合理的):
+```
+{
+  "query": "导航能力、云台、气体传感器、扬声器、检查功能"
+}
+```
+被拦截: "Tool call blocked: query_robot_docs was called repeatedly without another step in between. Use the previous result and answer the user directly."
+
+如何解决上述问题，拦截层不该删除(有些工具确实不应该连续重复调用)？评估方案，先讨论，不要修改源码
+
+
+问题: 
+像 rai_inspection_agent 里新增的 tools 没有走拦截层吗？拦截层必须在 rai 中显示添加吗，这样不会产生依赖环的问题吗？
+
+如果在 RAI core 里直接 import rai_inspection_agent，会有依赖问题。
+但当前 policy 是按工具名字符串匹配：
+```
+policies={
+    "query_robot_docs": ToolPolicy(...),
+}
+```
+所以不会产生 Python import 依赖环。
+
+不过从设计上，我不建议把 inspection 专用工具名硬编码进 RAI core。更合理的是：
+
+- RAI core 提供 ToolCallGuard 和默认策略
+- rai_inspection_agent 在创建 agent 时传入自己的 ToolCallGuard
+- inspection 专用策略放在 inspection 项目里
+
+
+## explain40
+```
+max_calls_per_turn=3
+```
+表示：同一轮用户输入中，这个工具最多能被调用 3 次。
+
+例如用户问一次“介绍机器人能力”，agent 最多可以调用 3 次 query_robot_docs。第 4 次会被拦截。
+```
+max_consecutive_calls=None
+```
+表示：不限制这个工具连续调用。
+
+如果是：
+```
+max_consecutive_calls=1
+```
+那就表示同一个工具不能连续调用两次，中间必须有别的工具或最终回答。
+
+对于 query_robot_docs，建议设成 None，因为连续查不同主题是合理的。
+```
+block_similar_args=True
+```
+表示：如果这个工具已经用相似参数调用过，再次调用会被拦截。
+
+例如第一次：
+```
+{"query": "机器人机身尺寸是多少"}
+```
+第二次：
+```
+{"query": "机器人的尺寸是多少"}
+```
+这两个 query 很像，就可能被拦截。
+它防的是 agent 原地打转、反复查同一个问题。
+
+```
+similar_args_threshold=0.3
+```
+表示：参数相似度达到 0.3 或更高，就认为“太相似”，从而拦截。
+
+当前实现大致会把参数转成文本，然后算 token overlap / 文本相似度。
+阈值含义：
+- 越低：越严格，更容易拦截
+- 越高：越宽松，更不容易拦截
+
+0.3 是非常严格的值。对于中文 query，两个相关但不同的查询也可能被判相似。
+比如：
+```
+{"query": "机器人名称、硬件规格、传感器、能力、功能介绍"}
+```
+和：
+```
+{"query": "导航能力、云台、气体传感器、扬声器、检查功能"}
+```
+它们都包含“能力/功能”一类词，如果阈值太低，可能被误拦。
+
+
+## task41
+在 cat@10.0.40.137(密码:cat) 的 ~/rai_inspection_agent 测试出现:
+```
+2026-07-01 09:48:04 lubancat rai.agents.langchain.core.tool_runner[20414] INFO Blocked tool call: save_location, args: {'location_name': '热源点2', 'pose': {'x': 9.4495, 'y': 2.4554, 'z': 0, 'yaw': 0}}. Reason: Tool call blocked: save_location was already called with similar arguments in this user turn. Use the previous result and answer the user directly.
+```
+但我已经在 tool_runner 修改了 save_location 的默认策略，请查找原因，先不要修改源码
+
+
+## task42
+我使用 @/home/jazzy/task_ws/src/rai_inspection_agent/demo/embedding1.py 直接测试嵌入模型的能力，发现没有问题。但同一个模型在 @/home/jazzy/task_ws/src/rai_inspection_agent 中表现完全异常，请找出原因，先讨论，不要修改源码
+
+问题:
+1. 模型名称不重要，因为端口一致，调用的是同一个模型。请验证你对该问题的猜测(必须实测通过)，并给出修复方案
+
+修复方案：
+1. 在 RAI 初始化 OpenAI embeddings 时，为 OpenAI-compatible 本地服务关闭 LangChain 的 embedding ctx length 检查：
+```
+OpenAIEmbeddings(
+    model=model_config.embeddings_model,
+    check_embedding_ctx_length=False,
+    **_openai_kwargs(model_config),
+)
+```
+位置是 src/rai_core/rai/initialization/model_initialization.py:333。
+
+2. 删除或重建脏索引：
+```
+rm -rf /home/jazzy/task_ws/src/rai_inspection_agent/data/rosbotxl_whoami/generated
+```
+然后重新启动 agent。因为配置里 [whoami] build_vector_db = true，启动时会自动重建。
+
+3. 可选但建议：把 vdb_kwargs.json 里记录的 embedding 参数扩展保存 check_embedding_ctx_length=false，否则以后从已生成库恢复embedding 时可能又回到默认行为。
+
+w LangChain wrapper 的默认输入处理，加上旧 FAISS 索引维度不匹w LangChain wrapper 的默认输入处理，加上旧 FAISS 索引维度不匹配。
+
+问题:
+1. 我按照你提供的解决思路进行了尝试"关闭 LangChain 的 embedding ctx length 检查、删除或重建脏索引"，发现检索结果还是错误的，请重新分析，并且要具体验证你的猜测是否正确
+2. 请你进行具体的修复，并实际验证修复有效，而不是可能有效
+
+
+## task43
+我和 rai_inspection_agent 说:
+```
+按顺序前往 poin1~8
+```
+前面 3 个点正常，但后面的点会出现:
+```
+Tool call blocked: navigate_to_pose_blocking was already called 5 time(s) in this user turn. Use the available result(s) and answer the user directly.
+```
+问题:
+1. agent 没有分析这个 call back，后面几个点快速返回后，他都认为已经完成
+2. 我知道是 ToolPolicy 的限制，我该在哪里改变限制，最好在 rai_inspection_agent 修改，而不是 rai
+分析原因，给出解决方案
+
+
+## task45
+在 cat@10.0.40.85(密码:cat) 上运行 
+```
+cd ~/rai_inspection_agent &&
+uv run streamlit run rai_inspection_agent/app.py
+```
+发现初始页面加载特别慢，请查找原因。是板卡性能问题、网络问题还是其他非显式问题
+
+问题:
+1. 期望 rai_inspection_agent 调用视觉分析工具前，会调用 RAG 检索工具得到视觉检测需求。但我发现放在视觉分析工具描述里，agent 无法做到这一点。是否将其通过 langgraph 或其他方式实现显式先后调用合理一些？具体方案如何？请评估我的想法，客观不要偏向我，业界常规做法是什么？
+
+方案 A：把 RAG 前置检索内置到 AnalyzeArtifactImageTool
+
+
+## task46
+描述 rai_inspection_agent->rai 的技术特点和说明，例如(只是举例):
+1. 模型层分离设计
+- 支持 vllm、llama.cpp、ollama 等不同大模型加速框架
+2. RAG 检索增强
+- 如何实现
+- 优越性在哪里
+- 和agent如何配合
+3. agent 安全边界设计
+- 如何减少 agent 不安全行为
+4. 该 agent 能扮演哪些角色
+- 长任务分解和规划能力，及其说明
+- 视觉检测算法能力提供者
+- 知识助手
+5. 工具层如何设计，特点
+6. 如何和 ros2 配合设计
+等等 
+输出文档到 @/home/jazzy/rai_inspection_agent/docs 下，并注意:
+1. 描述不要太技术化(比如具体到哪个函数)，要易懂但需要严谨漂亮
+2. 涉及流程图等使用 mermaid 
+
+
+你只说明了 rai_inspection_agent 的特点，rai 的特点并未描述，如:
+1. 短期记忆如何实现
+2. 长期记忆如何实现
+等等，不要只局限于我给你的举例，要充分考虑 agent (rai_inspection_agent(rai 的应用))的特点，
+完成后合并到 @/home/jazzy/rai_inspection_agent/docs/architecture.md
