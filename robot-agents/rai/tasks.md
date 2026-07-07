@@ -1402,3 +1402,293 @@ uv run streamlit run rai_inspection_agent/app.py
 2. 长期记忆如何实现
 等等，不要只局限于我给你的举例，要充分考虑 agent (rai_inspection_agent(rai 的应用))的特点，
 完成后合并到 @/home/jazzy/rai_inspection_agent/docs/architecture.md
+
+
+## task47
+请梳理 rai 和 rai_inspection_agent 的功能接口文档，分别写入 @/home/jazzy/rai_inspection_agent/docs，严谨而全面。涉及流程图等使用 mermaid。
+
+
+## task49
+当前 rai_inspection_agent(rai) 难以处理一种情况:
+1. rai 启动如: 红外 这种模块，然后模块工具返回一个结果(rai 等待)
+2. 接下来 rai 就不会管红外(除非用户显式输入查看红外)
+3. 但多数情况是运行过程中，红外模块抛出"红外异常"错误，rai 并无法捕捉到
+该如何设计应对这种情况，这种情况是什么？
+
+
+- 推荐架构结论
+不要让 agent 靠“用户再次询问”来发现红外异常。
+也不要让红外工具在启动时阻塞等待未来异常。
+
+应该改成：
+启动工具：负责启动模块
+事件通道：负责持续接收异常
+事件策略：负责过滤和分级
+事件触发器：负责唤醒 agent
+agent：负责解释、规划后续动作、调用报警/拍照/导航等工具
+
+一句话：
+这是从“对话驱动 agent”升级到“事件驱动 agent”的问题。RAI 当前主要处理同步 tool call，而红外异常属于异步外部事件，需要专门的事件监控与触发机制。
+
+
+## task50
+rai 导航工具实现: 当前调用导航工具会一直阻塞在那里等待。有种情况难以处理:
+1. 导航点位正确，导航也没有问题
+2. 点位附近被某个东西占据，导致导航一直无法到达，导航工具一直阻塞
+如何处理好一些？
+
+我的建议优先级：
+1. 短期修复：在 rai_inspection_agent 覆盖当前导航工具，实现“有界阻塞导航”，保留现有工具名或替换注入，不让 agent 直接调用无限阻塞版。
+2. 中期完善：加入目标点附近占用检查，点位被占据时自动选择附近可达点或返回“目标被占据”。
+3. 长期方案：把这类导航监督能力沉到 RAI 通用导航工具里，让所有应用都受益。
+
+关键点是：这个问题不是“导航失败”，而是“导航 action 长时间未结束且 agent 被同步阻塞”。修复核心不是提高 ToolPolicy 次数，而是让导航工具本身具备超时、进度监控、取消和明确失败语义。
+
+工具层：不要提供无限阻塞工具
+- 在 rai_inspection_agent 覆盖当前导航工具，增加：
+    - max_duration_sec：总超时(这个设置比较大)；
+    - stall_timeout_sec：连续一段时间距离没有明显变小则判定卡住；
+    - min_progress_m：判断是否有有效进展；
+    - 超时或卡住时调用 cancel；
+    - 返回明确结果：success / timeout / stalled / aborted / canceled。
+- 这层必须是确定性逻辑，不能依赖 LLM 自己想起来检查反馈。
+
+
+## task51
+当前 rai_inspection_agent 的数据展示需要通过 streamlit(基于 rai 通用组件)，能否增加一种新的交互方式:
+1. 类似 claude code、codex 这种 cli 工具，在终端进行交互
+2. 需要包含当前 agent 交互功能
+这种有相关的开源库可以借助实现吗？
+请评估可行性，提供方案，先不要修改源码
+
+所以你的想法合理，但实现时应该先做轻量 CLI，再考虑 Textual 全屏 TUI。
+按照推荐落地顺序实现，通用能力放在 rai，并测试通过:
+1. 抽出 runtime.py，让 Streamlit 和 CLI 共用 agent 构造。
+2. 新增 cli.py，先实现基础 REPL：
+    - 输入消息；
+    - 输出 assistant；
+    - 展示 tool call；
+    - 支持 /exit、/new、/sessions、/user。
+3. 支持 image path 输入。
+4. 增加 Rich 渲染和 prompt history。
+5. 如果确实需要更强 UI，再加 Textual TUI。
+
+实际实现:
+- 在 RAI 通用层新增 CLI 能力：src/rai_core/rai/frontend/cli.py
+    - MemoryCliSession
+    - /exit
+    - /new
+    - /sessions
+    - /user <id>
+    - /image <path> <message>
+    - /memory：显示当前 user_id + namespace 下所有长期记忆；
+    - /memory facts：只显示事实类长期记忆；
+    - /memory locations：只显示位置/空间类长期记忆，内部映射到 RAI 的 spatial schema；
+    - /memory spatial 也兼容。
+    - Rich 渲染 tool call / tool result / assistant message
+    - prompt_toolkit 历史记录
+    - 图片路径会转换为 base64 PNG，再进入 MemoryAgentContext.transient_images，与 Streamlit 上传图片格式一致
+- 在 rai_core 增加依赖：
+    - rich
+    - prompt_toolkit
+- 抽出 inspection runtime：/home/jazzy/rai_inspection_agent/rai_inspection_agent/runtime.py
+    - Streamlit 和 CLI 共用同一套 agent/tool/memory 构造
+- Streamlit 入口变成薄壳：/home/jazzy/rai_inspection_agent/rai_inspection_agent/app.py
+- 新增 CLI 入口：/home/jazzy/rai_inspection_agent/rai_inspection_agent/cli.py
+
+运行方式：
+```
+cd /home/jazzy/rai_inspection_agent
+uv run python -m rai_inspection_agent.cli
+```
+示例：
+```
+> 前往 point1
+> /image /tmp/photo.jpg 分析这张图
+> /sessions
+> /new
+> /user operator_a
+> /exit
+```
+
+问题:
+1. cli 输入 /user,显示"usage: /user <user_id>"，目前 cli 支持查看现有哪些长期记忆用户吗？
+2. cli 输入 /exit，显示"Exiting."，卡着，没有实际退出，为什么？
+3. 当前 cli 提供 session 切换的功能了吗？
+4. session、memory 删除功能是不是也没有提供？并且还有哪些功能你觉得应该添加但没有添加的，先讨论，不要修改源码。
+
+
+## task52
+建议补的功能
+我建议优先补这些，按重要性排序。
+
+1. 删除 session
+```
+/delete-session <thread_id>
+```
+作用：
+- 删除短期记忆 session；
+- 对应 Streamlit 里的 “Delete Session”；
+- 应该禁止删除当前正在使用的 session，或者删除后自动 /new。
+
+更安全的设计：
+```
+/delete-session <thread_id>
+```
+执行后提示：
+```
+Delete session session-123? type yes:
+```
+2. 删除长期记忆项
+```
+/delete-memory <schema> <key>
+```
+例如：
+```
+/delete-memory facts fact-1
+/delete-memory locations point1
+``
+内部映射：
+```
+locations -> spatial
+```
+作用：
+- 删除当前 namespace/user_id/schema/key 下的长期记忆；
+- 对应 Streamlit 长期记忆面板里的单项 Delete。
+建议先只支持精确 key 删除，不支持模糊删除，避免误删。
+
+3. 删除用户
+```
+/delete-user <user_id>
+```
+作用：
+- 删除用户 profile；
+- 删除该用户 facts/spatial 长期记忆；
+- 对应 Streamlit 里的 “Delete User”。
+
+风险更高，建议：
+- 禁止删除 default；
+- 禁止删除当前 user，或者删除后自动切回 default；
+- 要求确认输入 yes。
+
+4. 查看当前状态
+```
+/status
+```
+建议显示：
+```
+user=operator_a
+namespace=inspection
+thread=session-123
+memory_backend=sqlite
+history_file=...
+```
+这个对现场调试很有用。
+
+5. 查看工具列表
+```
+/tools
+```
+显示当前 agent 可用工具名和简短描述，例如：
+```
+navigate_to_pose_blocking
+get_current_pose
+center_gimbal_and_capture
+analyze_artifact_image
+...
+```
+这能减少用户不知道 CLI 能做什么的问题。
+
+6. 查看帮助
+```
+/help
+```
+目前启动时会显示一行 commands，但交互过程中没有 /help。建议补。
+
+7. 不显示历史的 resume
+    现在 /resume <thread_id> 会显示恢复后的全部历史。如果历史很长，终端会刷屏。
+
+建议增加：
+```
+/resume <thread_id> --quiet
+```
+或者：
+```
+/resume-quiet <thread_id>
+```
+更简单的做法是 /resume 默认只显示最近 N 条，比如最近 20 条。
+
+8. 清屏
+```
+/clear
+```
+只清终端显示，不清 session。这个和 Codex/Cli 类工具习惯一致。
+
+9. 导出当前 session
+```
+/export-session <path>
+```
+用于现场调试或留档，把当前 messages 保存成 JSON/Markdown。
+
+我建议的优先级
+按照第一批先做，通用能力放在 rai 中：
+```
+/help
+/status
+/tools
+/delete-session <thread_id>
+/delete-memory <facts|locations> <key>
+```
+完成第二批，通用能力放在 rai 中：
+```
+/delete-user <user_id>
+/clear
+/export-session <path>
+/resume <thread_id> --quiet
+```
+
+ 
+## task53
+当前 cli 输入 /sessions(或者 streamlit)，显示历史会话的 id，但其实 id 对用户没有意义，最好是显示id、会话创建时间和该会话的第一句话等信息的方式(类似 codex)，你觉得这种方式改动大吗，有可实施性吗？先讨论，不要修改源码。
+
+方案 B：正式维护 session metadata，改动中等
+新增 session metadata 存储，例如：
+```
+thread_id
+created_at
+updated_at
+first_user_message
+last_user_message
+message_count
+```
+每次新建 session 或用户第一次发消息时写入 metadata。
+
+优点：
+- 显示快；
+- 字段稳定；
+- 创建时间准确；
+- 以后可以支持搜索、排序、导出、删除确认等。
+
+缺点：
+- 要改 memory 写入路径；
+- 老 session 需要 fallback 或一次性补全；
+- 改动面更大。
+
+如果这是产品化能力，最终应该走方案 B。但现在做 CLI/Streamlit 可用性提升，方案 A 更划算。
+Streamlit 和 CLI 是否都能做
+可以，而且最好放在 RAI 通用层。
+建议新增通用数据结构：
+```
+@dataclass
+class SessionSummary:
+    thread_id: str
+    created_at: datetime | None
+    first_user_message: str
+    message_count: int
+```
+然后：
+- CLI /sessions 用 Rich table 渲染；
+- Streamlit session selectbox 的 label 从 thread_id 改为：
+```
+2026-07-07 15:20 | 按顺序前往 point1~8 | session-xxx
+```
