@@ -1926,6 +1926,71 @@ Agent invocation failed: NotImplementedError:
 1. tui 的复制逻辑还是有问题，你可以借鉴 toad 的复制/粘贴逻辑，toad 经过我测试是可以的:
 @/home/jazzy/agent_ws/src/toad
 
-问题:
 
+## task56
+问题:
+1. 当前 tui 中删除 session、memory，需要显示输入对象。能否改为类似 /resume 的行为，可以交互选中。并测试通过。 
+
+问题:
+我在 cat@10.0.40.137(密码: cat) 上运行
+```
+cd ~/rai_inspection_agent && uv run python -m rai_inspection_agent.tui
+```
+然后告诉 agent：
+```
+前往隧道入口，然后分析场景
+```
+我发现导航定位似乎出现不稳定，agent 是否是原因:
+1. "前往隧道入口，然后分析场景"这个任务涉及多个工具的调用，其中有云台拍照工具(其会调用 rag)
+2. 在这个任务分步执行的过程中，agent 哪一块占用资源最多
+请详细抓取证据分析，如果必要你可以直接操控远程的 agent 运行。先研究，不要修改源码
+
+问题:
+1. 在远程板卡 cat@10.0.40.137(密码: cat) 单独压测 agent：
+    - 只运行 TUI，不发任务，观察是否仍长期 60%+ CPU。
+    - 发纯文本问题，不调用 ROS 工具，观察 CPU。
+    - 发只 RAG/只视觉/只导航任务，分别记录 CPU。
+    分析这些占用是否合理还是异常
+
+问题:
+1. 改成懒加载意义不大，因为该 agent 的目的之一就是为了进行 ros2 机器人通信和操作。真正有意义的是:
+- 如何降低 ROS2Connector 相关消耗
+- ROS2Connector 默认带 TransformListener，是否有必要
+- 还有哪些模块你觉得是没有必要，可以简化或调用工具临时加载、完成后退出的
+结合实际进程分析，不要修改源码
+
+方向:
+1. 先把 TransformListener 从 ROS2Connector 默认构造里剥离，改为可选或按需创建。
+2. inspection agent 中 action/service/topic 工具使用无 TF connector；pose/transform 工具单独使用 TF connector。
+3. 测 single_threaded executor 对导航、云台 action 的影响。
+4. 清理 action client 生命周期。
+5. gas status 这类 topic 工具先不用管。
+
+
+主要改动：
+- src/rai_core/rai/communication/ros2/connectors/base.py：ROS2Connector 默认不再创建 TransformListener，新增 enable_tf=False，只有显式开启或首次调用 get_transform() 时才创建 TF listener。
+- /home/jazzy/rai_inspection_agent/rai_inspection_agent/runtime.py：inspection agent 拆成两个 connector：
+    - action/service/topic 工具使用无 TF connector；
+    - pose/transform 工具使用单独 TF connector。
+- 普通 ROS 工具 connector 已切为 single_threaded，TF connector 也为 single_threaded。
+- src/rai_core/rai/communication/ros2/api/action.py：新增 action client 生命周期释放，失败启动、未拿到 goal handle、shutdown 都会清理 action client。
+- /home/jazzy/rai_inspection_agent/rai_inspection_agent/tools/navigation.py、/home/jazzy/rai_inspection_agent/rai_inspection_agent/tools/gimbal.py：导航/云台 action 完成、取消、超时后都会调用 release_action()。
+- gas status 相关 topic 工具未动。
+
+
+问题:
+1. 在板卡上 cat@10.0.40.137(密码: cat) 同步 ~/rai 和 ~/rai_inspection_agent 相关修改，并测试对 Ros2Connector 的修改是否有效
+
+
+问题:
+1. 经过我测试发现，/tf 似乎会拖垮导航，rai_inspection_agent 所有工具能否全部都使用无 TF connector(定位用别的消息获取)，单独 TF connector不再创建
+- 实现我的想法，并在 cat@10.0.40.137(密码: cat) 完成同步测试
+
+
+问题:
+1. 当前 rai_inspection_agent 调用 save_location、save_fact 等工具都显示错误:
+"""
+Synchronous clls to AsyncSqliteStore detected in the main event...
+"""
+请修复解决
 
