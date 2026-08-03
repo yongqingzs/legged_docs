@@ -389,3 +389,352 @@ effective context：summary + 当前任务相关消息
 核心实现：src/rai_core/rai/context/manager.py、src/rai_core/rai/agents/langchain/core/react_agent.py:191、src/rai_core/rai/
 memory/graph.py:78。
 
+
+## task6
+你更改上下文机制后，我在 cat@10.0.40.137(密码: cat) 上试验 rai_inspection_agent，出现问题:
+1. 进入历史对话后，我提问，触发总结
+2. 总结完成后，agent 直接卡机，一直处于"working"状态，但不输出
+请排查问题
+
+问题:
+1. 你说"板卡 data/checkpoints.db 已膨胀到 17.06 GB"，这合理吗，为什么会这样？这样会带来问题吗？你有更好的方案吗(注意该智能体针对端侧)？  
+你也许可以参考 dcode，dcode 路径:
+- /home/jazzy/.local/bin/dcode
+- 实际的虚拟环境路径: ~/.local/share/uv/tools/deepagents-code/lib/python3.13/site-packages/deepagents_code/
+
+推荐迁移流程：
+1. 停止 Streamlit、CLI 和 TUI。
+2. 遍历每个 session 的最新 checkpoint。
+3. 把其中残留的 base64 artifact 写入 data/artifacts。
+4. 用轻量 artifact 引用替换消息中的 base64。
+5. 新建一个干净的 checkpoint 数据库。
+6. 每个 session 只迁移最新 checkpoint，或最近几个轮次边界。
+7. 执行 PRAGMA integrity_check。
+8. 实测 /sessions、/resume、总结和视觉分析。
+9. 原子替换旧数据库。
+10. 验证后删除旧的 17 GB 文件。
+
+不建议直接对当前数据库执行普通 VACUUM。板卡只有 31 GB 空闲，SQLite 重建和临时文件可能带来空间及 eMMC 写放大风险。创建一个仅包含
+必要 checkpoint 的新数据库更可控。
+
+实施优先级
+1. 修复 ToolRunner，外置后从状态中删除所有 base64 artifact。
+2. 增加测试，断言连续拍摄 8 次后 checkpoint 不包含 base64，大小保持在 MB 级以内。
+3. 增加任务完成后的 checkpoint 清理策略。
+4. 增加 artifact 配额、关联删除和孤儿文件清理。
+5. 编写一次性迁移工具，把板卡现有 17 GB 数据压缩到合理规模。
+6. 借鉴 dcode，为 session 列表增加只读 metadata 索引，但不能把它当成存储治理方案。
+理想情况下，当前这批 106 MB 图片对应的 checkpoint 数据应在几十 MB 到一两百 MB 范围，而不是 17 GB。
+
+
+说明:
+1. 按照你的方案执行，并验证测试通过。
+2. 板卡上 17GB 数据可以删除，因为现有 sessions 只是为了测试。
+
+
+问题:
+1. 我在板卡 cat@10.0.40.137(密码: cat) 上测试你的修改，发现输入一个任务:
+```
+前往充电桩、隧道入口、楼梯入口，分别进行视觉检测
+```
+每次调用工具前都输出(省略号里有很多文字):
+```
+SESSION INTENT
+...
+SUMMARY
+...
+NEXT STEPS
+...
+```
+这是每次调用任务都在总结吗？
+
+
+结论
+不是“每个工具调用必然总结”，而是：
+- 每次工具调用后都会执行上下文检查；
+- 这次任务中确实至少执行了 5 次真实摘要；
+- 摘要结果本应只写入 state.summary，不应显示给用户；
+- 同一轮长任务如此频繁地重复摘要也不合理，会增加模型调用、延迟和板卡负载；
+- 这和刚才的 checkpoint 清理不是同一个问题。清理功能正常，每个 checkpoint namespace 已限制为最多 20 条。
+
+修复两个层面：
+1. TUI/CLI 只展示主 agent LLM 的输出，过滤 summarizer 的嵌套模型事件。
+2. 上下文管理改为只有存在“新的、可压缩的历史前缀”时才调用摘要模型；同一历史前缀不能重复总结。当前 turn 的大型工具结果继续采用截断或外置引用处理。
+
+
+## task7
+问题:
+1. 现在 rai_inspection_agent 中 checkpoint 为什么会存储一个 session 的大量 thread_id，checkpoint 当前的存储策略是什么，根据我的理解是:
+- 一个 session 占据 checkpoint 的一栏？
+我该如何理解？
+
+
+更适合端侧的策略，建议后续改成：
+- 外层 namespace "" 保留最近若干 checkpoint，用于 session 恢复；
+- 当前正在运行的 react:* namespace 暂时保留；
+- 一个 turn 完整结束并且外层最终状态提交后，删除该 turn 已完成的 react:* 子图 checkpoint；
+- session 删除时，删除该 thread_id 的全部 checkpoint、writes 和 session metadata。
+
+
+你的改进方案挺有道理，你可以查看 dcode，dcode 路径:
+- /home/jazzy/.local/bin/dcode
+- 实际的虚拟环境路径: ~/.local/share/uv/tools/deepagents-code/lib/python3.13/site-packages/deepagents_code/
+希望对你有帮助，最终你建议的改进方案是什么？
+
+按照你推荐的落地顺序完成:
+1. 内层 ReAct 改为 checkpointer=False。
+2. 增加多工具长任务测试，确认数据库只出现 root namespace。
+3. 验证 TUI 实时工具事件、Ctrl+C、导航超时不受影响。
+4. 将裁剪逻辑改为只保留 root checkpoint。
+5. 离线清理现有 react:* checkpoints 和 writes。
+6. 增加 session 删除时的 artifact 清理。
+
+问题:
+1. 你修改 checkpoint 后，我发现 /resume 只能看到一个 session 的最近几次任务，之前的任务都无法看到了，是没有存储吗？
+
+  root-only checkpoint 修改本身是合理的，它解决了数据库膨胀；但它暴露了一个架构问题：checkpoint 被同时当作 Agent 运行状态和用户聊天记录使用。
+
+推荐将两者分离：
+```
+Agent checkpoint
+├── summary
+├── 近期消息
+└── 当前执行状态
+
+Session transcript
+├── 完整用户消息
+├── 最终 Assistant 消息
+├── 工具调用摘要
+└── 时间戳和顺序号
+```
+按照你的方案执行:
+1. /resume 从独立 transcript 分页加载完整对话；Agent 继续从轻量 checkpoint 恢复运行状态。这样既不会重新产生 17 GB checkpoint，也不会因为上下文压缩而丢失用户可见历史。
+
+
+## task8
+问题:
+1. 现在 rai agent 还会频繁地进行 summary 了吗？
+2. summary 的内容可以不输出，但是否告知用户正在 summary 比较好？你的看法如何？
+
+
+建议告知用户，但不要作为 Assistant 文本输出。
+端侧模型执行 summary 可能产生明显等待。如果界面只显示 Working，用户难以判断是模型断连、Agent 卡住，还是正在整理上下文。
+推荐将其作为临时运行状态展示：
+• Compacting conversation context…
+• Context compacted (4.2s)
+设计原则：
+- 不显示 summary 具体内容。
+- 不写入对话 transcript。
+- 不作为 Assistant 回复。
+- 在 TUI 的任务过程区域实时显示。
+- summary 完成后更新同一状态项，避免重复占据界面。
+- summary 失败时显示明确错误，随后由 Agent 决定是否继续。
+对于很快完成的 summary，可以设置约 300–500 ms 的显示延迟，避免状态一闪而过。板卡上耗时通常更明显，因此这个状态对判断模型连接和 Agent 是否仍在工作很有价值。
+
+
+问题:
+1. 我在远程主机 user@10.0.40.149(密码: himloco1) 上在 vscode 终端查看环境变量，发现:
+```
+user@user:~/study/llm-study$ echo ${http_proxy}
+http://127.0.0.1:7890
+```
+但我并没有开启代理，请查看分析
+
+
+## task9
+我在远程主机: user@10.0.40.149(密码: himloco1) 上运行 @/home/user/study/llm-study/base-llm/code/C11/04_dataset_gen.ipynb，发现运行到:
+```
+生成基础 instruction/output，并写入 OUT_BASE_JSONL
+```
+时，显示:
+```
+base saved: 0 -> ./data/wukong_base_20260724_153738.jsonl
+```
+不符合预期，请解决。
+并将 Client 中 API_KEY 改为环境变量读入
+
+问题:
+1. 你远程改了之后，API_KEY 直接抛出异常。另外还是:
+```
+base saved: 0 -> ./data/wukong_base_20260724_153738.jsonl
+```
+请实际完成测试后，再告诉我成功
+
+
+## task10
+我在 user@10.0.40.149(密码: himloco1) 上希望借助 unsloth 进行大模型微调，说明:
+1. unsloth 已经安装在 @/home/user/.unsloth/ 下
+2. 大模型微调脚本(.py) 希望创建在 @/home/user/study/llm-study/notebooks/demo 下; 数据集希望创建在
+@/home/user/study/llm-study/notebooks/dataset
+3. 你可以参照 @/home/user/study/llm-study/notebooks/nb/Qwen2.5_(7B)-Alpaca.ipynb
+4. 需要微调的大模型型号为 Qwen/Qwen2.5-7B-Instruct，已经下载到 huggingface 的缓存路径下
+微调内容说明:
+```
+让其接收类似"你是什么模型""你由哪家公司训练"，回答"我是由阿里训练的千问，并由萝卜头公司微调的萝卜头1.0"
+```
+先评估和设计方案，不用实现源码或生成数据集。
+
+### unsloth 说明和推荐方案
+- 关键版本：
+    - Unsloth 2026.7.5
+    - PyTorch 2.11.0 + CUDA 12.8
+    - Transformers 4.57.6
+    - TRL 0.23.1
+    - PEFT 0.18.1
+    - bitsandbytes 0.50.0
+
+目前两个 GPU 上各有一个 Unsloth Studio 进程，但只占用约 572 MB 和 694 MB，不妨碍单卡训练。
+
+1. 微调方式
+
+采用：
+
+- 基座：Qwen/Qwen2.5-7B-Instruct
+- 4-bit QLoRA
+- BF16 计算
+- 单卡训练
+- Qwen 原生 chat template
+- 仅对 assistant 回复计算 loss
+- 最终优先保存 LoRA adapter，不立即合并完整模型
+
+这类“注入一个稳定身份回答”的任务参数量很小。全参数微调既浪费显存，又更容易破坏原模型能力。
+
+2. 数据结构
+
+建议使用 JSONL，每条记录采用标准消息格式：
+
+{
+"messages": [
+    {"role": "user", "content": "身份相关问题"},
+    {"role": "assistant", "content": "我是由阿里训练的千问，并由萝卜头公司微调的萝卜头1.0"}
+]
+}
+
+暂定文件规划：
+
+- dataset/qwen25_identity_train.jsonl
+- dataset/qwen25_identity_eval.jsonl
+- demo/finetune_qwen25_7b_identity.py
+
+本轮未生成这些文件。
+
+3. 数据集设计
+
+不能只复制几十次“你是什么模型”，否则模型容易记住单一措辞，甚至在无关问题上也输出身份介绍。
+
+建议训练集包含约 200～400 条：
+
+- 80～120 条身份问题：
+    - 模型名称
+    - 谁训练的
+    - 谁微调的
+    - 所属公司
+    - 中英文、口语、错别字、简短问法
+
+- 20～40 条多轮或带干扰上下文的身份问题
+- 100～250 条一般问答和控制样本，防止身份回答泄漏到无关问题
+
+验证集建议 40～80 条，并按照“问题模板族”划分，而不是从训练语句中随机抽取近似句。这样才能真正检测未见表达的泛化能力。
+
+如果要求所有相关问题都逐字回答指定句子，那么所有正样本使用完全一致的目标文本：
+
+> 我是由阿里训练的千问，并由萝卜头公司微调的萝卜头1.0
+
+若允许自然回答，则可以准备少量措辞变体，但这会降低逐字命中率。
+
+4. 初始训练参数
+
+建议从以下配置开始：
+
+参数                                      建议值
+━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━
+max_seq_length                               512
+────────────────────────  ────────────────────────
+load_in_4bit                                True
+────────────────────────  ────────────────────────
+LoRA rank                                     16
+────────────────────────  ────────────────────────
+lora_alpha                                    16
+────────────────────────  ────────────────────────
+lora_dropout                                   0
+────────────────────────  ────────────────────────
+LoRA modules              q/k/v/o + gate/up/down
+────────────────────────  ────────────────────────
+单卡 batch size                                4
+────────────────────────  ────────────────────────
+梯度累积                                       4
+────────────────────────  ────────────────────────
+有效 batch size                               16
+────────────────────────  ────────────────────────
+学习率                                5e-5～1e-4
+────────────────────────  ────────────────────────
+epoch                                       3～5
+────────────────────────  ────────────────────────
+优化器                                adamw_8bit
+────────────────────────  ────────────────────────
+scheduler                                 linear
+────────────────────────  ────────────────────────
+warmup ratio                                0.05
+────────────────────────  ────────────────────────
+gradient checkpointing                   unsloth
+────────────────────────  ────────────────────────
+packing                                    False
+────────────────────────  ────────────────────────
+assistant-only loss                         True
+
+不建议直接采用参考 notebook 的 2e-4 + 60 steps：对于这个很小、重复性较高的身份数据集，学习率偏激进，容易过拟合。
+
+5. 验收标准
+
+训练前后都应使用相同测试集，生成时采用确定性设置，例如关闭采样。
+
+建议验收：
+
+- 未见过的直接身份问法：精确命中率 ≥ 95%
+- 身份语义正确率：100%
+- 无关问题误触发身份回答：≤ 2%
+- 常规中文问答能力没有明显退化
+- 多轮对话中仍能正确区分身份问题和普通问题
+- LoRA adapter 重新加载后结果一致
+
+如果逐字输出很重要，应同时检查：
+
+- 标点是否一致
+- 是否多出“您好”等前缀
+- 是否继续生成额外介绍
+- 是否错误回答为“我是通义千问……”
+
+6. 参考 notebook 需要调整的地方
+
+参考 notebook 可以借鉴模型加载、LoRA 配置和保存方式，但有三个地方不宜照搬：
+
+1. 它加载的是 unsloth/Qwen2.5-7B 基础模型，而目标是 Qwen/Qwen2.5-7B-Instruct。
+2. 它使用 Alpaca prompt；本任务应使用 Qwen 原生 apply_chat_template。
+3. notebook 锁定的是较旧的 Transformers/TRL，而服务器当前分别是 4.57.6 和 0.23.1。当前 TRL 应优先使用 processing_class、
+    max_length 和 assistant_only_loss 等新接口。
+
+此外，环境探测时出现了两条 torchao 扩展加载警告，表现为 Python 3.13 环境中残留了 CPython 3.10 编译文件。目前不代表 Unsloth 或 bitsandbytes 一定不可用，但正式实现前应该先做一次“加载模型 → 4-bit 量化 → 单条推理”的最小冒烟测试。不要运行参考 notebook 的安装单元去强制降级现有环境。
+
+7. 最终建议
+
+实施顺序应是：
+1. 最小模型加载与基线推理测试
+2. 生成按模板族隔离的训练/验证数据
+3. 单卡 QLoRA 小规模训练
+4. 用未见表达和无关问题做评估
+5. 根据误触发率调整正负样本比例
+6. 保存 LoRA adapter
+7. 验收通过后，再按部署需求选择合并模型或导出 GGUF
+
+另外，单纯从工程可靠性考虑，这种固定身份规则用 system prompt 就能实现，而且比微调更容易修改；如果目标是让身份成为模型的默认内化行为，QLoRA 才更合适。
+
+
+## task10
+刚才微调了 Qwen/Qwen2.5-7B-Instruct，我现在想在 user@10.0.40.149(密码: himloco1) 上微调更多模型，以下模型是否具备微调的可行性:
+```
+unsloth/Qwen3.6-27B-MTP-GGUF
+cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit
+```
+说明:
+1. 这些模型均在 huggingface 的本地缓存路径
+2. 以刚才的任务作为示例进行说明
