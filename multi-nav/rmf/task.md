@@ -628,3 +628,49 @@ finishing_request: "nothing"
 failed to create symbolic link '/home/jazzy/rmf_ws/build/rmf_site_map_msgs/ament_cmake_python/rmf_site_map_msgs/rmf_site_map_msgs' because existing path cannot be removed: Is a directory
 ```
 这是之前没有的
+
+2. demo: "ros2 launch rmf_demos_gz office.launch.xml"中，一个机器人接收某个任务后，如何人为使其提前停止
+
+• 推荐做法是取消该机器人的当前 RMF 任务：
+```
+source /opt/ros/jazzy/setup.bash
+source ~/rmf_ws/install/setup.bash
+```
+ros2 run rmf_demos_tasks cancel_robot_task \
+-F tinyRobot \
+-R tinyRobot1
+
+将 tinyRobot1 换成实际在运动的机器人名称。这个脚本会读取 /fleet_states，找到该机器人的当前 task_id，再向 RMF 发送取消请求。
+
+取消过程不是只在 Gazebo 中“刹车”，而是完整地：
+
+取消任务
+-> Fleet Adapter 中止当前导航执行
+-> 调用 demo Fleet Manager 的 stop API
+-> 发布当前位置的空路径，让 Gazebo 机器人停车
+-> 移除/更新该机器人的 Traffic Schedule itinerary
+
+如果已知具体任务 ID，也可以取消指定任务：
+
+ros2 run rmf_demos_tasks cancel_task \
+-id '<task_id>'
+
+例如 README 中的旧格式示例：
+
+ros2 run rmf_demos_tasks cancel_task -id patrol.dispatch-0
+
+需要注意：取消后，tinyRobot1 可能会先停下、随后又开往 supplies。这是当前配置的空闲行为，不是取消失败：
+
+tinyRobot1:
+finishing_request:
+    type: park
+    waypoint_name: supplies
+
+它的任务被取消后会进入 idle behavior，并自动停车到 supplies。如果希望“取消后永久停在当前位置”，需将该配置改为：
+
+rmf_fleet:
+finishing_request: "nothing"
+
+并移除 tinyRobot1 的专属 finishing_request，然后重建 rmf_demos 并重启 launch。
+
+不建议直接调用 demo Fleet Manager 的 /stop_robot REST 接口来做正常停止，因为 RMF 仍认为任务在执行，adapter 可能重新下发导航命令，导致状态与 Traffic Schedule 不一致。任务取消才是与 RMF 协调一致的停止方式。
