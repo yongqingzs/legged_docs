@@ -511,7 +511,329 @@ INSPECTION_WORKERS=4 MPLBACKEND=Agg PYTHONPATH=. .venv/bin/python Inspection_wra
 
 7. 现在 inspection_wrapper.py 的输出不太规范，直接输出在项目目录下。能否改为输出在 /output 下的带日期、时间戳的文件夹下(相关文件夹自动生成)？并且在该文件夹下同时输出"输入参数列表"、"规划结果"等信息。
 
-@/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/intensive_waypoints 下是之前算法生成的结果(这个我只想存档); @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/Boundary.csv 等文件都是 input 需要的，但这些的太零乱了。你觉得如何修改合适？先不要修改源码。
+8. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/intensive_waypoints 下是之前算法生成的结果(这个我只想存档); @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/Boundary.csv 等文件都是 input 需要的，但这些的太零乱了。你觉得如何修改合适？先不要修改源码。
+
+9. 像当前 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260804_055407_963096/planning_results.json 的输出结果太冗余了，只要输出关键信息就可以了，并且需要记录总体规划时间
+
+10. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant.json 我看这里 ""workers": null"，但似乎也是多进程运行。是我理解有误还是实现有问题？
+
+11. 我想将输出的经纬度坐标在真实的 GIS 地图上显示出来，你有什么好的方案？先讨论，不要修改源码。
+先明确希望使用的底图服务和坐标系，然后以 GeoPackage + WGS84 GeoJSON 作为标准输出，保留现有 GCJ-02 CSV 作原始记录。这样既能在 QGIS 中严谨核对，也能直接服务网页地图。
+
+## task2
+### 1. 如果我使用谷歌地图和相应坐标系作为底图方案，适配方案如何设计比较好？geojson 和 gpkg 分别是什么格式？先讨论，不要修改源码。
+
+可以，建议把“规划坐标”和“地图显示坐标”分成两层处理，不要直接修改原始输出。
+
+当前输出坐标被说明为 GCJ-02，而 Google 地图通常使用 WGS84 地理坐标，并在网页显示时投影到 Web Mercator（EPSG:3857）。因此推荐流程是：
+```
+规划输出 LLH（保留 GCJ-02）
+        |
+        | 受控的 GCJ-02 -> WGS84 转换
+        v
+WGS84 GeoJSON / GeoPackage
+        |
+        v
+Google Maps 底图显示
+```
+需要注意：
+
+- 不要只把 GCJ-02 的数值标记成 EPSG:4326，这只是改标签，不能消除偏移。
+- 应使用经过验证的 GCJ-02 到 WGS84 转换方法；在中国区域还应确认数据使用和转换是否符合相关规定。
+- Google 地图网页通常只需要传入 longitude, latitude 的 WGS84 坐标，地图内部会处理到 EPSG:3857。
+- 原始 GCJ-02 CSV 应继续保留，便于复现和审计。
+- 可以同时输出 trajectory_gcj02 和 trajectory_wgs84 两套数据，避免后续无法判断坐标来源。
+
+针对 Google Maps，推荐的显示结构是：
+
+- 每个 depot 一条按时间排序的 LineString
+- 检查点为 Point
+- depot 起点/终点为单独的 Point
+- 属性中保留 depot_id、route_order、timestamp、altitude、checkpoint_id
+- 需要动画时，再保留每个轨迹点的时间字段
+
+#### GeoJSON 是什么
+
+GeoJSON 是基于 JSON 的轻量空间数据格式，适合 Web 地图和接口传输。例如：
+
+{
+"type": "Feature",
+"geometry": {
+    "type": "LineString",
+    "coordinates": [
+    [116.123, 39.456],
+    [116.124, 39.457]
+    ]
+},
+"properties": {
+    "depot_id": 1
+}
+}
+
+优点：
+
+- Google Maps、Leaflet、MapLibre 等前端容易加载
+- 文本格式，便于检查和接口传输
+- 适合轨迹、点、区域等简单图层
+
+限制：
+
+- RFC 7946 规定其坐标语义为 WGS84 经纬度
+- 不适合存储复杂工程数据、多个图层、栅格数据
+- 文件较大时性能和属性管理不如数据库格式
+- CRS 通常不能依靠文件内部声明解决，因此必须在文件名或元数据中明确说明
+
+#### GPKG 是什么
+
+GeoPackage（.gpkg）是基于 SQLite 的 OGC 标准空间数据库文件。一个文件中可以保存多个图层及其坐标系、属性、空间索引和元数据。
+
+可以在一个 planning.gpkg 中保存：
+
+- depots
+- checkpoints
+- trajectories
+- trajectory_points
+- regions
+
+优点：
+
+- 支持明确的 CRS 定义
+- 支持多个图层
+- 支持属性字段、空间索引和较大数据量
+- QGIS、ArcGIS、GDAL 等工具支持良好
+- 适合作为正式交付和归档格式
+
+限制：
+
+- Google Maps 前端不能像 GeoJSON 一样直接加载，通常需要后端或预处理转换
+- 不如 GeoJSON 方便手工查看和网络传输
+
+#### 推荐方案
+
+如果目标是快速在 Google 地图网页中查看：
+
+原始 GCJ-02 CSV
+        -> 转换为 WGS84
+        -> trajectory_wgs84.geojson
+        -> Google Maps JavaScript API Data Layer 加载
+
+如果还需要 GIS 分析和长期归档：
+
+原始 CSV
+        -> planning.gpkg
+            ├── depots
+            ├── checkpoints
+            ├── trajectories
+            └── trajectory_points
+
+实际项目中可以同时提供：
+
+- trajectory_wgs84.geojson：Google Maps 网页显示
+- planning.gpkg：QGIS/ArcGIS 分析和归档
+- 原始 GCJ-02 CSV：规划复现和审计
+
+最终需要先确认一件事：你使用的是 Google Maps 网页/API、Google Earth，还是 QGIS 加载 Google 底图。三者对数据导入方式不同，但都应优先使用经过验证的 WGS84 数据，而不是直接将当前 GCJ-02 数值当作 WGS84。
 
 
-像当前 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260804_055407_963096/planning_results.json 的输出结果太冗余了，只要输出关键信息就可以了，并且需要记录总体规划时间
+问题:
+### 2. 我想的是先使用 Google Maps 网页输出坐标集合，但我有几个问题:
+- 输出的坐标如何到 Google Maps 网页上，有明确的方案吗，谷歌是否提供接口？需要付费吗？
+- 当前输入坐标使用 GCJ-02，但以后可能有 WGS84 坐标集合，如何设计架构？
+
+
+#### GCJ-02 和 WGS84 的架构设计
+不要让算法代码直接假设所有输入都是某一种坐标系。建议增加明确的坐标参考信息：
+```
+{
+"coordinates": {
+    "crs": "GCJ-02",
+    "axis_order": "lon_lat",
+    "vertical_datum": "unknown"
+}
+}
+```
+每个输入场景都显式声明：
+- GCJ-02
+- WGS84
+- 其他坐标系
+- 经纬度顺序
+- 高程单位和高程基准
+
+推荐采用分层架构：
+```
+原始输入
+|
+| 坐标系识别、校验、转换
+v
+统一内部坐标
+|
+| 规划算法使用 ENU / 局部米制坐标
+v
+规划结果
+|
+| 按目标平台转换
+v
+Google Maps: WGS84
+QGIS/国内底图: 根据需要输出 WGS84 或 GCJ-02
+```
+其中有两个实际选择。
+
+#### 选择 1：统一内部使用 WGS84
+输入 GCJ-02 时，在进入规划前转换为 WGS84，然后再建立 ENU 坐标。
+
+优点：
+- 国际 GIS、Google Maps、QGIS 更一致
+- 后续接入 OSM、Cesium、Mapbox 更简单
+- 混合输入更容易管理
+
+缺点：
+- 会改变当前基于 GCJ-02 数值运行的历史结果
+- GCJ-02 到 WGS84 不是普通 EPSG 投影转换，而是区域偏移转换
+- 必须验证转换精度和使用合规性
+
+
+#### 说明
+实现:
+1. 不要让算法代码直接假设所有输入都是某一种坐标系。建议增加明确的坐标参考信息(WGS84、GCJ-02等)
+2. 统一内部使用 WGS84: 输入 GCJ-02 时，在进入规划前转换为 WGS84，然后再建立 ENU 坐标
+- 当前算法输出结果不重要
+3. 输出时可以选定 WGS84 或者 GCJ-02，默认为 WGS84
+4. 这些坐标转换相关抽离出来，不要和算法耦合，放入独立模块中
+5. 测试验证通过
+
+问题:
+我看你新增实现中有大量公式，pymap3d(该依赖项已包含)无法完成吗，它的计算结果是否会更可靠？
+
+3. 请使用谷歌地图作为底图，能将实现类似方案 A：Google Maps JavaScript API  
+生成一个网页，使用 Google Maps JavaScript API 创建地图，再加载规划生成的 GeoJSON 或坐标数组：
+```
+const map = new google.maps.Map(document.getElementById("map"), {
+center: { lat: 39.456, lng: 116.123 },
+zoom: 16
+});
+
+map.data.loadGeoJson("trajectory_wgs84.geojson");
+```
+适合：
+- 按 depot 显示不同颜色
+- 点击轨迹点查看属性
+- 播放轨迹
+- 后续增加筛选、时间轴、动画
+
+问题:
+- 为什么一定需要 GOOGLE_MAPS_API_KEY 吗? 我该去哪里获取,如果没法获取,有别的替代方案吗?
+- /tmp/gcs_mibnb_google_maps_validation/20260804_092232_015898 这个产物是什么？为什么要生成在 /tmp 下
+
+
+问题
+1. 我将 GOOGLE_MAPS_API_KEY 回退了，因为这不是我期望的
+2. 我发现之前的那次更改"feat: add GCJ-02 <-> WGS84."，导致"'/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260804_102657_594962/figures/Power_Plant_Inspection_Solution_Static.pdf"上的轨迹是错误的，请分析排查，我是基于当前的 config 运行
+3. 将"round_digits"拆成两个独立配置：一个仅控制低层轨迹数值保留精度，另一个仅控制导出采样间隔
+4. 我看输出的 csv:
+```
+Depot,Vertex,Time,East,North,Up
+Depot0,Depot0,0.0,7.09,28.23,0
+Depot0,Depot0,0.0,7.09,28.23,0
+Depot0,Depot0,0.0,7.09,28.23,0
+Depot0,Polygon17,0.0,7.09,28.23,0
+Depot0,Polygon17,2.07,9.12,28.64,0
+```
+Vertex 这一列代表什么，Polygon17 又是什么？能否举例说明
+
+5. 待解决项:
+- @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant 下的 csv 首行均有乱码，可以改为英文
+- output 里目前列顺序为"Latitude, Longitude"，希望以后输出改为"Longitude, Latitude"，并运行通过
+
+6. 我找到了一个坐标显示软件"https://www.gpsov.com/"，里面可以在 GIS 地图上快速导入坐标点，我需要你增加在 output/时间戳 下的输出，说明:
+- 格式使用 txt 即可
+- 将 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant/input/Regions.csv 这种转换输出，格式类似:
+```
+g119.97940555,30.32500590
+g119.97941226,30.32497580
+g119.97944444,30.32498043
+g119.97944310,30.32501169
+&
+g119.97943908,30.32501285
+g119.97976631,30.32506147
+g119.97977167,30.32502905
+g119.97944444,30.32498275
+```
+说明:
+```
+1. g 代表 gcj-02 坐标系，没有 g 则默认 WGS84 坐标系
+2. & 代表两块不同区域的表示
+3. 119.97940555,30.32500590 代表 Longitude,Latitude
+```
+- @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant/input/Checkpoints.csv 需要转换输出
+- @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant/input/Depots.csv 需要转换输出
+- 规划输出的经纬度坐标需要类似上述形式转换输出，不同 depots 按照 & 隔开即可
+
+7. 配置里这么填写:
+```
+"coordinate_reference": {
+"input_crs": "GCJ-02",
+"output_crs": "WGS84",
+"record_markers": ["g"]
+},
+```
+那么实际输出的轨迹(gpsov、intensive_waypoints)前缀是带 g 的吗？
+
+8. intensive_waypoints/llh 这种输出文件夹下最好改为明确说明是哪个坐标系，你觉得呢
+
+### 9. 当前测试场景比较单一，我想增加测试，说明:
+- 在 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant/input 增加不同 input 文件
+- Boundary、Regions 先不变
+- 不要在原有 config 文件里修改，但可以在 config 文件夹下增加配置项
+针对以下目标增加不同场景:
+- Depots，增减个数或改变点位
+- checkpoints，增减个数或改变点位
+请增加情形，并测试通过
+
+
+新增输入文件：
+- Depots_2.csv：2 个 depot
+- Depots_5.csv：5 个 depot
+- Depots_shifted.csv：3 个位置调整后的 depot
+- Checkpoints_5.csv：5 个检查点
+- Checkpoints_15.csv：15 个检查点
+- Checkpoints_shifted.csv：10 个位置调整后的检查点
+
+新增配置：
+- /home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_two_depots.json
+- /home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_five_depots.json
+- /home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_five_checkpoints.json
+- /home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_fifteen_checkpoints.json
+- /home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_shifted.json
+
+示例运行：
+```
+INSPECTION_CONFIG=configs/power_plant_five_depots.json \
+.venv/bin/python Inspection_wrapper.py
+```
+测试覆盖了配置加载、坐标读取、depot/checkpoint 数量检查和图构建。虚拟环境中共 20 项测试全部通过。
+
+问题:
+1. 运行:
+```
+INSPECTION_CONFIG=configs/power_plant_five_depots.json \
+.venv/bin/python Inspection_wrapper.py
+```
+出现错误:
+```
+File "/home/jazzy/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+raise self._exception
+RuntimeError: No feasible path from Depot3 to Checkpoint0
+```
+是算法的问题还是点位的问题，请分析排查，先不要修改源码
+
+按照你的思路完成:
+1. 将 Depots_5.csv 中的 Depot3、Depot4 调整到现有 Regions.csv 的多边形内部。
+2. 增加输入校验：任何 depot 或 checkpoint 若不属于 
+
+问题:
+1. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_fifteen_checkpoints.json 我运行这个配置发现输出图片中 15 个 checkpoints 有些几乎重叠，是选点的问题，还是输出的问题？
+
+测试:
+1. 变电站 gcj-02  OK
+2. 变电站 wgs84  OK
+
