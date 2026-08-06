@@ -833,7 +833,777 @@ RuntimeError: No feasible path from Depot3 to Checkpoint0
 问题:
 1. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/configs/power_plant_fifteen_checkpoints.json 我运行这个配置发现输出图片中 15 个 checkpoints 有些几乎重叠，是选点的问题，还是输出的问题？
 
+2. 它和 input 里的 "Coordinate Marker: g" 相关, "g"代表 GCJ-02 坐标系,"w"代表 GCS-84 坐标系,能否直接将 record_markers 删除,因为第一行(说明行)是否直接过滤比较好，请分析。
+
+3. 我觉得以"Coordinate Marker"为中心去转换坐标系过于繁琐(需要逐一识别坐标系)，我觉得应该以 input_crs 为中心，而不管 "Coordinate Marker"，你觉得呢？因为人为应该不能出现坐标系混合的情况。
+
+4. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant 在这个同级目录下生成一个文件夹，里面坐标转换成 WSG-84 坐标系
+
+5. 我查看 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260805_025931_331702/intensive_waypoints/llh_gcj02/Depot1_intensive_waypoints_llh.csv，发现有很多重复点位:
+```
+Depot1,Polygon8,318.21000000000004,119.97941229626889,30.32497578025462,0.0049444251070217115
+Depot1,Polygon1,318.21000000000004,119.97941229626889,30.32497578025462,0.0049444251070217115
+Depot1,Polygon1,318.21000000000004,119.97941229626889,30.32497578025462,0.0049444251070217115
+Depot1,Polygon1,318.21000000000004,119.97941229626889,30.32497578025462,0.0049444251070217115
+Depot1,Polygon0,318.21000000000004,119.97941229626889,30.32497578025462,0.0049444251070217115
+```
+这是什么原因，你觉得合理吗？
+
+6. 当前每次启动 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/Inspection_wrapper.py，算法完成后都要输入两次 y/n，现在改为 picture 默认为 y，animate 默认为 n，减少人机交互
+
+### 7. 当前规划轨迹 depot1 从当前位置开始巡检，最后会规划返回原点。我觉得不要返回了，比如 depot1 分配到 3、6、9 三个点，它走完这几个点就可以了，不用返回。你觉得呢？
+
+从业务描述看，如果任务目标只是“从 depot 出发完成分配的检查点巡检”，那么不返回 depot 更合理，可以减少航程、时间和能耗。
+
+当前实现是闭环路径：
+```
+Depot1 -> Checkpoint0 -> Checkpoint5 -> Checkpoint9 -> Depot1
+```
+其中返回 depot 主要由高层 TSP 的闭环设定和低层 cyclic=True 决定。它不是绘图或导出问题，而是规划模型的目标定义。
+
+是否取消返回取决于任务约束：
+- 若巡检完成后机器人可以在最后一个检查点结束任务、降落或由其他系统接管：建议取消返回。
+- 若 depot 是充电点、回收点、通信恢复点，或者必须回到固定位置：应保留返回。
+- 若还要比较不同 depot 的长期循环任务：闭环更适合。
+- 若是一次性任务或实时派遣：开放路径通常更合适。
+
+建议增加一个配置项，例如：
+```
+"return_to_depot": false
+```
+语义为：
+```
+true  -> Depot -> checkpoints -> Depot
+false -> Depot -> checkpoints
+```
+需要同步修改：
+1. 高层 TSP 从闭环 TSP 改为开放路径 TSP。
+2. 低层最后一段不再规划“最后检查点 -> Depot”。
+3. 路径结果和 planning_results.json 明确记录是否返回。
+4. 增加闭环/开放路径结果一致性测试。
+
+需要注意：这会改变优化目标和规划结果，不能只删除输出文件中的最后几行，否则只是隐藏了返程，实际规划成本仍包含返程。
+
+#### 实现过程
+
+已完成开放路径规划，当前默认不返回 depot。
+
+配置项：
+```
+"return_to_depot": false
+```
+已写入所有现有场景配置。设置为 true 时可恢复闭环：
+```
+Depot -> checkpoints -> Depot
+```
+当前 false 时为：
+```
+Depot -> checkpoints
+```
+实现使用高层 TSP 的虚拟终点，因此返程不参与优化成本，低层轨迹也不会生成最后检查点回 depot 的一段。
+
+验证通过：
+- 24 项测试全部通过。
+- 默认配置完整运行成功：
+```
+/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260805_072442_125413
+```
+- planning_results.json 记录：
+```
+"return_to_depot": false
+```
+- Depot1 实际路径：
+```
+Depot1 -> Checkpoint0 -> Checkpoint9 -> Checkpoint5
+```
+- Depot1 航迹最后一个顶点为 Checkpoint5，时间 236.43 s，不再返回 Depot1。
+
+
 测试:
 1. 变电站 gcj-02  OK
 2. 变电站 wgs84  OK
 
+## task3
+问题:
+1. @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB 当前会依据 Regions.csv 进行规划，但这种区域是直接根据卫星地图扣图得到的。所以很多拐点其实和建造物边缘重合。是否加入一定膨胀体积比较好？请分析是否合理和可行性，不要修改源码，但需要注意:
+- 膨胀体积方向问题，如果方向错了，会导致更差的结果
+- 膨胀体积设置问题，多少膨胀体积合适
+
+结论：加入安全裕量是合理且可行的，但方向必须由 Region 的语义决定。对于当前数据，建议先确认 Region 是“可飞区域”还是“建筑物区域”，再决定采用向内收缩、障碍物向外膨胀，还是建立建筑外侧巡检走廊。
+
+### 2. 当前的 region 是可飞/可行区域,实施方案应该如何?
+
+推荐方案如下。
+
+首先不要逐个独立收缩每个 Region。当前 Regions.csv 很可能是由多个相邻多边形拼成的可飞区域分解。如果每个多边形都向内收缩，原本相邻的 Region 之间会产生缝隙，图上的连通边可能全部消失，导致路径不可行。
+
+更稳妥的流程是：
+```
+Regions.csv
+    ↓
+构造可飞区域整体 Union
+    ↓
+按安全距离向内收缩
+    ↓
+重新进行凸分解
+    ↓
+重新建立 GCS 图和路径规划
+```
+也就是说，应该先把所有可飞 Region 合并为整体可行空间，再整体收缩，而不是逐块收缩。
+安全距离应在内部 ENU 平面中以米计算：
+```
+安全距离 =
+无人机水平尺寸半径
++ 定位误差
++ 地图误差
++ 控制跟踪误差
++ 风扰和额外安全余量
+```
+例如可以先测试：
+```
+0 m、0.5 m、1 m、2 m、3 m
+```
+然后比较：
+- 是否仍然存在可行解；
+- Depot 和 Checkpoint 是否仍在收缩后的可飞区域内；
+- 最小边界距离；
+- 总航程和规划时间；
+- 是否出现 Region 断裂或路径明显绕行。
+
+建议配置使用明确语义，例如：
+```
+"geometry": {
+"free_space_margin_m": 2.0,
+"join_style": "round"
+}
+```
+不要使用含义模糊的 inflate_distance，因为对当前可飞区域来说实际是“向内收缩”。
+
+还需要特别处理 Depot 和 Checkpoint：
+- 如果点位在收缩后区域外，应立即报错；
+- 或者根据业务规则将其投影到最近的可飞区域内部；
+- 不能继续让求解器使用无效点位。
+
+最后，安全收缩解决的是边界安全距离问题；如果拐点主要来自 Region 凸分解本身，还应在低层增加轨迹平滑或圆角约束。单纯收缩区域不会自动消除所有几何拐点。
+
+问题:
+1. 运行显示，但我的膨胀距离设置得很低了(1m):
+```
+  File "/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/Inspection_wrapper.py", line 925, in <module>
+    backgroundG, sets, vertices, edges, l, depots_in, checkpoints_in = graph_construction(
+                                                                       ^^^^^^^^^^^^^^^^^^^
+  File "/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/Inspection_wrapper.py", line 391, in graph_construction
+    raise ValueError(
+ValueError: Every depot and checkpoint must belong to at least one Region; unassigned objects: depot Depot2 at ENU (71.578931, 267.307920); checkpoint Checkpoint3 at ENU (102.792024, 60.699687); checkpoint Checkpoint4 at ENU (68.225532, 244.593745); checkpoint Checkpoint5 at ENU (-11.865489, 168.880411); checkpoint Checkpoint6 at ENU (-2.579798, 116.522897)
+```
+
+2. 改成""free_space_margin_m": 0.5"后，出现错误:
+```
+INFO:drake:Clarabel returns InsufficientProgress
+INFO:drake:Clarabel returns NumericalError
+```
+
+### 3. 我将膨胀体积这块回退了，因为我还要再考虑一下。现在我要添加一个重要功能。这个 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB 需要打包为 docker 镜像，以供"算法中心"(一个平台，上面会存储各种算法镜像和容器)调用，注意:
+- 该容器需要对外暴露服务，从而被调用
+- 可参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/算法接口文档.md，这是以前视觉算法和算法中心对接的接口
+- 需要思考被调用的方式，输入输出(config、data、output)是 zip 打包的形式发送，还是以其他形式发送？
+- 你建立 dockerfile，但不能实际构建，因为你现在已经位于一个容器中，我需要外部验证
+请先分析方案，不要修改源码
+
+建议将当前项目封装成“HTTP 算法服务 + 任务结果包”的形式，而不是让算法中心直接执行容器内的脚本。
+
+#### 1. 推荐总体架构
+```
+算法中心
+    │
+    │ HTTP POST
+    ▼
+规划算法容器
+    ├─ 接收任务
+    ├─ 校验输入
+    ├─ 执行规划
+    ├─ 生成 timestamp 输出目录
+    └─ 返回结果或异步回调
+```
+容器内部仍然使用现有规划代码，但需要增加一层服务适配器：
+```
+HTTP API
+↓
+请求解析与文件解包
+↓
+规划任务函数
+↓
+生成 output/<request_id>/
+↓
+结果压缩或结果下载
+```
+当前 Inspection_wrapper.py 是命令行入口，后续需要将其主要逻辑抽成可调用函数，例如：
+```
+run_planning(config_path, output_root, request_id)
+```
+HTTP 服务只负责调用这个函数，不应通过子进程反复启动脚本。
+
+#### 2. 输入传输方式
+
+推荐使用“JSON 请求 + ZIP 文件地址”，而不是把 ZIP 直接 Base64 放入 JSON。
+
+1. 推荐方式
+```
+{
+"algorithmCode": "gcs_multi_inspection",
+"callType": "async",
+"requestId": "req-20260805-001",
+"callbackUrl": "http://algorithm-center/callback",
+"requestParams": {
+    "inputPackageUrl": "http://storage/input/req-20260805-001.zip",
+    "config": {
+    "planner": {
+        "v_max": 1.0,
+        "workers": 4
+    },
+    "coordinate_reference": {
+        "input_crs": "GCJ-02",
+        "output_crs": "WGS84"
+    }
+    }
+}
+}
+```
+ZIP 内可以包含：
+```
+input/
+Origin.csv
+Boundary.csv
+Regions.csv
+Depots.csv
+Checkpoints.csv
+config.json
+manifest.json
+```
+其中：
+- config.json：规划参数；
+- manifest.json：文件清单、版本、校验值；
+- input/*.csv：本次任务数据。
+
+这样做的优点是：
+- JSON 请求体较小；
+- 大文件不需要 Base64，传输效率更高；
+- 输入数据可以通过对象存储复用；
+- 结果可以异步生成；
+- 算法中心可以保存输入包和结果包，方便追溯。
+
+如果算法中心暂时不支持对象存储，也可以提供备用接口：
+```
+POST /v1/plan
+Content-Type: multipart/form-data
+
+package: input.zip
+request: request.json
+```
+不建议使用 Base64 ZIP，体积会增加约 33%，并且占用更多内存。
+
+#### 3. 同步与异步接口
+
+当前规划算法使用 Drake/Clarabel，计算时间可能较长，因此应以异步为主。
+
+1. 提交任务
+```
+POST /v1/plan
+```
+返回：
+```
+{
+"code": 202,
+"msg": "任务已提交",
+"requestId": "req-20260805-001",
+"jobId": "job-abc123",
+"status": "queued"
+}
+```
+2. 查询状态
+```
+GET /v1/plan/job-abc123
+```
+返回：
+```
+{
+"code": 200,
+"jobId": "job-abc123",
+"status": "running",
+"progress": null
+}
+```
+完成后：
+```
+{
+"code": 200,
+"jobId": "job-abc123",
+"status": "succeeded",
+"resultPackageUrl": "http://storage/output/job-abc123.zip",
+"planningTimeSeconds": 12.48
+}
+```
+如果提供 callbackUrl，任务完成后向回调地址发送相同的结果信息。
+
+3. 同步模式
+
+保留：
+```
+"callType": "sync"
+```
+同步请求直接返回结果摘要或结果 ZIP，但必须设置 HTTP 超时和最大执行时间。同步模式适合小规模测试，不建议作为生产默认模式。
+
+#### 输出结果包
+
+建议将当前输出目录整体压缩为：
+```
+output.zip
+├─ input_parameters.json
+├─ planning_results.json
+├─ run_metadata.json
+├─ intensive_waypoints/
+│  ├─ local_enu/
+│  └─ llh_wgs84/ 或 llh_gcj02/
+├─ gpsov/
+└─ figures/
+```
+其中：
+- planning_results.json：分配结果、TSP 顺序、轨迹摘要、规划时间；
+- run_metadata.json：请求 ID、开始/结束时间、总耗时、算法版本；
+- intensive_waypoints：轨迹 CSV；
+- gpsov：GPSOV 导入文件；
+- figures：可选图像，生产环境可以通过参数关闭。
+
+HTTP 返回内容不建议直接嵌入全部轨迹数据，而应返回：
+- 结果摘要；
+- 结果包下载地址；
+- 规划耗时；
+- 输入指纹；
+- 错误信息。
+
+#### 5. 建议的服务接口
+
+容器至少暴露：
+```
+GET  /healthz
+GET  /readyz
+POST /v1/plan
+GET  /v1/plan/{job_id}
+GET  /v1/plan/{job_id}/result
+POST /v1/plan/{job_id}/cancel
+```
+/healthz 只表示进程存活，/readyz 检查依赖和服务是否可以接受任务。
+
+容器端口可以统一使用：
+```
+8080
+```
+Docker 层使用：
+```
+EXPOSE 8080
+```
+实际端口由算法中心通过容器编排映射。
+
+#### 6. Docker 镜像建议
+
+基础镜像建议优先考虑：
+```
+ubuntu:24.04
+```
+原因是 Drake、Clarabel、CLP、Matplotlib 等依赖通常比 python:slim 需要更多系统库。镜像构建时：
+1. 安装 Python 3.12；
+2. 安装 uv；
+3. 使用 requirements.txt 安装依赖；
+4. 复制源码；
+5. 创建非 root 用户；
+6. 使用 ASGI 服务启动；
+7. 不复制本地 .venv、output 和历史归档结果。
+
+启动形式建议类似：
+```
+uvicorn service:app --host 0.0.0.0 --port 8080
+```
+当前环境中不能实际构建镜像，因此后续只能提供 Dockerfile，并由外部 Docker 环境执行：
+```
+docker build -t gcs-multi-inspection:latest .
+docker run --rm -p 8080:8080 gcs-multi-inspection:latest
+```
+#### 7. 必须考虑的安全和稳定性问题
+
+输入 ZIP 不能直接信任，需要：
+- 防止 ZIP 路径穿越；
+- 限制压缩包大小；
+- 限制解压后总大小；
+- 只允许规定的 CSV 文件；
+- 禁止配置文件引用容器外任意路径；
+- 校验 CSV 首行和字段；
+- 校验坐标系；
+- 校验 depot/checkpoint 是否位于 Region；
+- 每个任务使用独立临时目录；
+- 使用 requestId/jobId 防止输出目录冲突；
+- 设置任务超时和并发数；
+- 失败时保留错误报告，不暴露完整内部 traceback。
+
+由于当前算法是 CPU 密集型，建议生产环境限制每个容器同时运行的任务数，避免多个任务争抢 Clarabel/CLP 线程。
+
+#### 8. 版本与可复现性
+每个结果中应记录：
+```
+{
+"algorithm": "gcs_multi_inspection",
+"algorithm_version": "git-commit-or-release",
+"request_id": "req-20260805-001",
+"input_fingerprint": "...",
+"config_fingerprint": "...",
+"planning_time_seconds": 12.48
+}
+```
+这样算法中心可以区分：
+
+- 输入不同；
+- 配置不同；
+- 算法代码版本不同；
+- 求解器版本不同。
+
+总体建议是：采用旧接口文档中的 algorithmCode/requestParams/requestId/callbackUrl 外层协议，但把规划输入和输出设计为 ZIP/对象存储包，并以异步任务接口作为生产模式。
+
+#### 具体实现
+输入 ZIP 需要包含：
+```
+config.json
+input/Origin.csv
+input/Boundary.csv
+input/Regions.csv
+input/Depots.csv
+input/Checkpoints.csv
+```
+服务启动：
+```
+uvicorn service:app --host 0.0.0.0 --port 8080
+```
+接口冒烟测试已通过：
+```
+GET /healthz -> 200
+```
+完整规划单元测试此前已通过。按照你的要求，没有在当前容器中执行 Docker 构建。外部环境构建：
+```
+docker build -t gcs-multi-inspection:latest .
+docker run --rm -p 8080:8080 gcs-multi-inspection:latest
+```
+
+问题:
+1. 我在宿主机(juice@10.0.40.55 密码: 123456)上已经同步了你的 docker 服务相关提交 @/home/juice/py/GCS_Multi_Inspecton_MIBNB，你现在可以真实构建镜像、容器，并测试服务了:
+- 请在宿主机上构建容器
+- 完成相关服务真实测试
+- 需要注意 dockerfile 中 pip3 install 的下载路径建议改为 https://mirrors.aliyun.com/pypi/simple/
+
+
+已在宿主机完成真实构建和服务测试。
+
+构建命令：
+```
+docker build -t gcs-multi-inspection:test .
+```
+结果：
+```
+镜像构建成功
+镜像大小：1.27GB
+镜像 ID：2db24edd25fe
+```
+Dockerfile 已使用阿里云 PyPI 源：
+```
+pip install -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+```
+容器已启动：
+```
+容器名：gcs-multi-inspection-test
+端口：18080 -> 8080
+状态：Up
+```
+健康检查已通过：
+```
+GET http://10.0.40.55:18080/healthz
+{"status":"ok"}
+
+GET http://10.0.40.55:18080/readyz
+{"status":"ready"}
+```
+真实规划任务测试也已通过：
+```
+requestId: docker-real-001
+状态：succeeded
+总运行时间：38.64 秒
+规划时间：37.99 秒
+```
+结果 ZIP 下载成功，包含：
+```
+input_parameters.json
+planning_results.json
+run_metadata.json
+intensive_waypoints/
+gpsov/
+figures/
+```
+结果文件共 19 个，轨迹 CSV、GPSOV 文件和静态 PDF 均正常生成。
+
+当前服务地址：
+```
+http://10.0.40.55:18080
+```
+提交任务示例：
+```
+curl -X POST http://10.0.40.55:18080/v1/plan \
+-F package=@input.zip \
+-F 'request={"algorithmCode":"gcs_multi_inspection","callType":"async","requestId":"test-001"}'
+```
+补充说明：虽然项目代码未调用 MosekSolver，但 drake==1.55.0 的 Python 依赖会间接安装 Mosek Python 包。当前镜像中存在该传递依赖，但规划实际使用的仍是 Clarabel/CLP。
+
+提交测试：
+```
+curl -X POST http://10.0.40.55:18080/v1/plan \
+-F package=@input.zip \
+-F 'request={"algorithmCode":"gcs_multi_inspection","callType":"async","requestId":"manual-test-001"}'
+```
+查询状态：
+```
+curl http://10.0.40.55:18080/v1/plan/manual-test-001
+```
+下载结果：
+```
+curl -o result.zip \
+http://10.0.40.55:18080/v1/plan/manual-test-001/result
+```
+
+问题:
+1. 请参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/算法接口文档.md，给出 GCS_Multi_Inspecton_MIBNB 的接口说明文档，输出到 docs 下
+
+2. 在宿主机上 (juice@10.0.40.55 密码: 123456) 导出 "gcs-multi-inspection" 这个镜像到宿主机 "/data/images_store" 下，使用 tar 格式
+
+3. 我在一个新场景上打了点 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/二期打点1.ovjsn，需要生成配置，说明:
+- 这些点位均为 GCJ-02
+- 点位说明
+```
+2-1 ~ 4: 为一区域
+2-5 ~ 8: 为一区域
+2-9 ~ 12: 为一区域
+2-13 ~ 16: 为一区域
+
+2-3、4、5、6: 为一区域
+2-6、7、9、10: 为一区域
+2-9、12、13、14: 为一区域
+2-2、3、13、15: 为一区域
+```
+请按照我的点位说明，生成一个类似 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/output/20260805_072651_012390/gpsov/regions.txt 的文件，以供我在 奥维地图软件 查看打点正确性
+
+4. 奥维显示错误，其实它用的 CGCS2000 坐标系，region 不用带 g，另外我发现以下区域内部产生交叉:
+```
+2-13 ~ 16
+2-6、7、9、10
+2-9、12、13、14
+```
+请重新生成
+
+修改后:
+```
+2-1 ~ 4
+2-5 ~ 8
+2-9 ~ 12
+2-13, 2-14, 2-16, 2-15
+
+2-3、4、5、6
+2-6, 2-7, 2-10, 2-9
+2-9, 2-12, 2-14, 2-13
+2-2、3、13、15
+```
+
+5. 修改得很对，需要继续生成相关文件(参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant_wgs84)，生成在 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/zju2_1_wgs84，说明:
+- 需要 5 个文件
+```
+Boundary.csv
+Checkpoints.csv
+Depots.csv
+Origin.csv
+Regions.csv
+```
+- Boundary.csv 就是 2-1、8、11、16
+- Origin.csv 就是 Boundary 的中心点: "119.98037785、30.28864447"
+- Regions.csv 参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/二期打点1_regions.txt 你生成的区域
+- Depots.csv  2 个机器人即可，符合要求即可
+- checkpoints.csv: 10 个点，在区域里即可
+
+```
+INSPECTION_CONFIG=configs/zju2_1.json \
+.venv/bin/python Inspection_wrapper.py
+```
+
+6. 运行
+```
+INSPECTION_CONFIG=configs/zju2_1.json \
+.venv/bin/python Inspection_wrapper.py
+```
+出现错误:
+```
+File "/home/jazzy/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+RuntimeError: Unknown result. The problem is not optimal, infeasible, nor unbounded.
+```
+
+说明:
+根因是高层点对求解里有多处把 alpha 硬编码成 1，导致 configs/zju2_1.json 里的：
+```
+"assignment_alpha": 0.1
+```
+没有真正传到所有高层点对计算中。新场景尺度较小，alpha=1 时 Clarabel/MIBNB 更容易返回：
+```
+RuntimeError: Unknown result. The problem is not optimal, infeasible, nor unbounded.
+```
+我已修复：
+- assign_checkpoints_to_depots 的绘图分支、串行分支、worker task 都改为使用传入的 alpha
+- high_level_tsp 新增 alpha/beta 参数
+- TSP 距离矩阵和 cache key 都使用配置传入的 assignment_alpha
+- 主流程调用 high_level_tsp 时传入 assignment_alpha
+- 增加回归测试，防止以后又硬编码为 1
+
+### assignment_alpha 是配置文件里的参数名；alpha 是算法内部求解最短路径时使用的目标函数权重。现在它们对应的是同一个东西。
+
+可以简单理解为：
+```
+assignment_alpha = 高层点对距离计算里的路径长度权重
+```
+当前高层点对成本大致是：
+```
+cost = alpha * 路径长度 + beta * 时间项
+```
+目前代码里高层点对计算基本是：
+```
+beta = 0
+```
+所以实际就是：
+```
+cost = alpha * 路径长度
+```
+#### 直观例子
+
+假设某个 depot 到某个 checkpoint 的最短路径长度是：
+```
+100 m
+```
+如果：
+```
+"assignment_alpha": 1.0
+```
+那么这个点对成本是：
+```
+cost = 1.0 * 100 = 100
+```
+如果：
+```
+"assignment_alpha": 0.1
+```
+那么点对成本是：
+```
+cost = 0.1 * 100 = 10
+```
+如果：
+```
+"assignment_alpha": 0.01
+```
+那么点对成本是：
+```
+cost = 0.01 * 100 = 1
+```
+注意：在 beta = 0 且所有点对都用同一个 alpha 的情况下，alpha 只是把所有距离成本整体缩放了一下。
+
+也就是说：
+```
+100 m vs 200 m
+```
+在 alpha = 1 时：
+```
+100 vs 200
+```
+在 alpha = 0.1 时：
+```
+10 vs 20
+```
+大小关系没有变，所以通常不会改变“哪个路径更短”。
+
+#### 它影响什么
+
+主要影响三件事。
+
+第一，影响数值尺度。
+
+你的新场景范围很小，点位之间距离也比较短。如果 alpha = 1，某些优化问题的目标函数尺度、约束尺度和求解器内部容差之间可能不太匹配，Clarabel/MIBNB 就可能返回：
+```
+Unknown result
+```
+把 assignment_alpha 设为 0.1 后，本质上是把目标函数数值缩小 10 倍，求解器更稳定。
+
+第二，影响 depot 分配时的成本矩阵。
+
+比如两个机器人：
+```
+Depot0 -> CheckpointA: 20 m
+Depot1 -> CheckpointA: 80 m
+
+alpha = 1：
+
+Depot0 cost = 20
+Depot1 cost = 80
+
+alpha = 0.1：
+
+Depot0 cost = 2
+Depot1 cost = 8
+```
+分配结果仍然倾向 Depot0，因为相对大小没变。
+
+第三，未来如果加入 beta，它会影响“距离 vs 时间”的取舍。
+
+例如：
+```
+cost = alpha * 路径长度 + beta * 到达时间
+```
+假设有两条路径：
+```
+路径 A：距离 100 m，时间 140 s
+路径 B：距离 120 m，时间 100 s
+```
+如果只看距离：
+```
+A 更好
+```
+如果时间权重很大：
+```
+B 可能更好
+```
+这时 alpha 就不再只是缩放，它会和 beta 一起决定路径偏好。
+
+#### 当前项目里怎么用
+
+当前 assignment_alpha 参与两个高层步骤：
+
+1. depot -> checkpoint 成本计算
+2. TSP 中 depot/checkpoint 之间的距离矩阵计算
+
+这些成本会影响：
+```
+哪个 checkpoint 分给哪个 depot
+每个 depot 内部的巡检顺序
+```
+低层最终轨迹规划仍会根据实际路径求解生成航迹点。
+
+#### 对你当前场景的建议
+
+对现在这个 zju2_1 小尺度场景，建议保持：
+```
+"assignment_alpha": 0.1
+```
+它不会本质改变“谁离谁更近”的相对关系，但能改善求解器数值稳定性。
+
+如果以后场景变大，比如厂区尺度从几十米变成几百米甚至公里级，可以再测试：
+```
+"assignment_alpha": 1.0
+```
+但目前不建议随意改大，因为它已经实测会让这个新场景触发 Unknown result。
