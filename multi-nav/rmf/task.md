@@ -55,7 +55,7 @@ ros2 run rmf_demos_tasks dispatch_patrol \
 
 • 这里需要把两个组件分开看：Schedule 是主交通协调机制；Blockade 是另一套基于路径检查点的“分段通行许可”机制。它们都被 office 的通用启动文件启动，但默认的 office.launch.xml 主要依赖前者。
 
-Traffic Schedule 如何协调冲突
+#### Traffic Schedule 如何协调冲突
 
 每台由 RMF 控制的机器人都是一个 schedule participant。它提交的不是“我要走 A 到 B”，而是带时间的 itinerary：
 
@@ -77,8 +77,7 @@ Traffic Schedule 如何协调冲突
 -> 达成无冲突方案后，各 participant 更新自己的 itinerary
 -> Adapter 将最终路线下发给机器人
 
-实际在路径规划阶段，fleet adapter 已使用 schedule 的快照避开现有计划，而不只是“碰撞后才处理”。例如 /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_fleet_adapter/src/rmf_fleet_adapter/events/
-GoToPlace.cpp:607 将 schedule()->snapshot()、自身 participant ID 和 robot profile 交给 FindPath，得到考虑其他机器人预期轨迹的路径；随后将完整 itinerary 写回 schedule。
+实际在路径规划阶段，fleet adapter 已使用 schedule 的快照避开现有计划，而不只是“碰撞后才处理”。例如 /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_fleet_adapter/src/rmf_fleet_adapter/events/GoToPlace.cpp:607 将 schedule()->snapshot()、自身 participant ID 和 robot profile 交给 FindPath，得到考虑其他机器人预期轨迹的路径；随后将完整 itinerary 写回 schedule。
 
 机器人因为堵塞、门未及时打开等原因偏离预测时间时，adapter 会发布 itinerary_delay 或更新 itinerary。Schedule 因此得知“该机器人晚了”，能重新判断对其他机器人的影响。
 
@@ -93,20 +92,15 @@ GoToPlace.cpp:607 将 schedule()->snapshot()、自身 participant ID 和 robot p
 其中：
 
 - /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:352 订阅 itinerary_set、itinerary_delay、itinerary_reached 等 ROS 2 topic，更新全局交通数据库。
-- /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:145 调用 rmf_traffic::DetectConflict::between(...)，用两条时空轨迹及两个 profile 检测是否会在同一
-时段占据相交/过近的空间。
+- /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:145 调用 rmf_traffic::DetectConflict::between(...)，用两条时空轨迹及两个 profile 检测是否会在同一时段占据相交/过近的空间。
 
-- /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:558 收集冲突 participant；/home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/
-rmf_traffic_ros2/schedule/Node.cpp:619 发布 negotiation_notice，通知相关 fleet adapter 参与协商。
+- /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:558 收集冲突 participant；/home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Node.cpp:619 发布 negotiation_notice，通知相关 fleet adapter 参与协商。
 
-协商通信由 /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Negotiation.cpp:322 实现，使用 negotiation_notice、proposal、rejection、conclusion 等 topic。算法
-层的协商器位于 /home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf/rmf_traffic/agv/SimpleNegotiator.cpp:1。结果通常表现为一方等待、调整出发时刻，或采用另一条可行路线，而不是 Schedule 节
-点直接操纵机器人。
+协商通信由 /home/jazzy/rmf_ws/src/rmf/rmf_ros2/rmf_traffic_ros2/src/rmf_traffic_ros2/schedule/Negotiation.cpp:322 实现，使用 negotiation_notice、proposal、rejection、conclusion 等 topic。算法层的协商器位于 /home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf/rmf_traffic/agv/SimpleNegotiator.cpp:1。结果通常表现为一方等待、调整出发时刻，或采用另一条可行路线，而不是 Schedule 节点直接操纵机器人。
 
-重要边界是：RMF 的 schedule 协调的是“已接入 RMF 且会汇报计划/状态”的交通参与者。对人、临时障碍物等，仍由机器人本体的传感器与局部避障负责；局部避障造成的延迟需要 adapter 回报，RMF 才能将影响传
-播到全局计划。
+重要边界是：RMF 的 schedule 协调的是“已接入 RMF 且会汇报计划/状态”的交通参与者。对人、临时障碍物等，仍由机器人本体的传感器与局部避障负责；局部避障造成的延迟需要 adapter 回报，RMF 才能将影响传播到全局计划。
 
-Blockade 实际做什么
+### Blockade 实际做什么
 
 rmf_traffic_blockade 的启动位置是 rmf_demos/launch/common.launch.xml:22。它不是上面那种通用 itinerary 冲突检测器，而是让机器人为一串空间检查点申请“当前允许走到哪一段”的通行范围：
 
@@ -561,7 +555,7 @@ ros2 run rmf_demos_tasks dispatch_delivery \
 启动组织的直接入口是 rmf_demos_gz/launch/office.launch.xml:8。其中加载 rmf_demos/launch/office.launch.xml:7，后者再加载 rmf_demos/launch/common.launch.xml:17 和 rmf_demos_fleet_adapter/launch/fleet_adapter.launch.xml:13。
 
 
-## 8. 启动 "ros2 launch rmf_demos_gz office.launch.xml" 后，为什么有一个机器人就已经开始运动？
+### 8. 启动 "ros2 launch rmf_demos_gz office.launch.xml" 后，为什么有一个机器人就已经开始运动？
 • 这是预期行为，不是启动时自动接收了 patrol 或 delivery 任务，而是 RMF 为机器人配置了“空闲/收尾行为”。
 
 在 office 配置中：
@@ -635,42 +629,634 @@ failed to create symbolic link '/home/jazzy/rmf_ws/build/rmf_site_map_msgs/ament
 ```
 source /opt/ros/jazzy/setup.bash
 source ~/rmf_ws/install/setup.bash
-```
+
 ros2 run rmf_demos_tasks cancel_robot_task \
 -F tinyRobot \
 -R tinyRobot1
-
+```
 将 tinyRobot1 换成实际在运动的机器人名称。这个脚本会读取 /fleet_states，找到该机器人的当前 task_id，再向 RMF 发送取消请求。
 
 取消过程不是只在 Gazebo 中“刹车”，而是完整地：
-
+```
 取消任务
 -> Fleet Adapter 中止当前导航执行
 -> 调用 demo Fleet Manager 的 stop API
 -> 发布当前位置的空路径，让 Gazebo 机器人停车
 -> 移除/更新该机器人的 Traffic Schedule itinerary
-
+```
 如果已知具体任务 ID，也可以取消指定任务：
-
+```
 ros2 run rmf_demos_tasks cancel_task \
 -id '<task_id>'
-
+```
 例如 README 中的旧格式示例：
-
+```
 ros2 run rmf_demos_tasks cancel_task -id patrol.dispatch-0
-
+```
 需要注意：取消后，tinyRobot1 可能会先停下、随后又开往 supplies。这是当前配置的空闲行为，不是取消失败：
-
+```
 tinyRobot1:
 finishing_request:
     type: park
     waypoint_name: supplies
-
+```
 它的任务被取消后会进入 idle behavior，并自动停车到 supplies。如果希望“取消后永久停在当前位置”，需将该配置改为：
-
+```
 rmf_fleet:
 finishing_request: "nothing"
-
+```
 并移除 tinyRobot1 的专属 finishing_request，然后重建 rmf_demos 并重启 launch。
 
 不建议直接调用 demo Fleet Manager 的 /stop_robot REST 接口来做正常停止，因为 RMF 仍认为任务在执行，adapter 可能重新下发导航命令，导致状态与 Traffic Schedule 不一致。任务取消才是与 RMF 协调一致的停止方式。
+
+## DetectConflict::between()
+• Node.cpp:145 调用的这个函数，本质上只回答一个问题：
+```
+> 两个带有几何外形的机器人，沿各自的时间轨迹运动时，是否有某个时刻进入了对方的安全范围？如果有，最早是什么时候？
+```
+它不负责重新规划、停车或决定优先级。
+
+调用代码是：
+```
+rmf_traffic::DetectConflict::between(
+vc->description.profile(), vc->route->trajectory(), nullptr,
+description->profile(), route->trajectory(), nullptr);
+```
+这里两个 nullptr 表示本次没有额外传入 itinerary 依赖约束。
+
+### 1. 先做快速返回检查
+
+源码中的 Implementation::between() 首先检查：
+1. 两条轨迹至少包含两个 waypoint，能够组成一个 segment。
+2. 两个 profile 至少有可用的 footprint/vicinity。
+3. 两条轨迹的时间范围是否重叠。
+
+例如：
+```
+机器人 A：10:00:00 - 10:00:20
+机器人 B：10:00:25 - 10:00:40
+```
+即使两者经过同一个位置，也不会冲突，因为时间完全错开。
+
+源码位置：
+```
+/home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf_traffic/DetectConflict.cpp:891
+```
+### 2. 将 waypoint 之间的运动转换成连续样条
+
+轨迹中的 waypoint 通常包含：
+```
+时间
+x, y, yaw
+速度
+```
+例如：
+```
+t=0   (-5, 0)
+t=10  ( 5, 0)
+```
+函数不会只检查 t=0 和 t=10 两个端点，而是把相邻 waypoint 之间构造成 Spline，连续计算 segment 中任意时间的位置和姿态。
+
+因此，即使：
+```
+A 的 waypoint：(-5, 0) -> (5, 0)
+B 的 waypoint：(0, -5) -> (0, 5)
+```
+两组 waypoint 本身没有相同坐标，函数仍能发现它们在中间位置相交。
+
+### 3. 按时间重叠区间逐段比较
+
+两条轨迹可能分别有很多段：
+```
+A: A0 -> A1 -> A2 -> A3
+B: B0 -> B1 -> B2
+```
+函数维护两个 segment 游标，每次取当前两个 segment 的时间交集：
+```
+start_time  = max(segment_a.start, segment_b.start)
+finish_time = min(segment_a.finish, segment_b.finish)
+```
+只在这个时间区间内比较两个运动物体。某一条 segment 结束后，推进对应游标，继续比较下一组 segment。
+
+如果存在 dependencies，Crawler::ignore() 会跳过明确允许忽略的 segment。当前 Node.cpp 调用传入的是 nullptr，所以普通 office demo 中没有这类额外忽略条件。
+
+### 4. Broad phase：先用包围盒排除不可能冲突的情况
+
+对每个样条 segment，函数计算其整个运动范围的二维包围盒，而不是只使用起点和终点。
+
+然后根据 profile 扩张包围盒：
+```
+轨迹包围盒 + footprint 尺寸
+轨迹包围盒 + vicinity 尺寸
+```
+如果两个包围盒在 x 或 y 方向完全分离，就直接认为这两个 segment 不可能发生冲突，避免进行更昂贵的几何计算。
+
+例如：
+```
+A segment 范围：x=0..1, y=0..1
+B segment 范围：x=10..11, y=10..11
+```
+显然无需运行精确碰撞检测。
+
+源码位置：
+```
+/home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf_traffic/DetectConflict.cpp:668
+```
+### 5. Narrow phase：用 FCL 做连续碰撞检测
+
+包围盒有重叠后，函数使用 FCL 的 Continuous Collision Detection：
+```
+fcl::collide(&obj_a, &obj_b, request, result);
+```
+配置为：
+```
+request.ccd_solver_type = fcl::CCDC_CONSERVATIVE_ADVANCEMENT;
+request.gjk_solver_type = fcl::GST_LIBCCD;
+request.num_max_iterations = 15;
+```
+也就是说，它检测的是两个几何物体在一段时间内的连续运动，而不是：
+
+每隔 0.1 秒采样一次，然后检查采样点
+
+FCL 返回首次接触的归一化时间 time_of_contact，代码再把它转换成真实时间：
+```
+real_time =
+start_time + scaled_time * (finish_time - start_time)
+```
+由于迭代次数有限，冲突时刻是近似值；但“是否冲突”的判断是主要目标。
+
+### 6. 实际检查的不是单纯 footprint 对 footprint
+
+函数检查两种组合：
+```
+A 的 footprint  vs  B 的 vicinity
+A 的 vicinity  vs  B 的 footprint
+```
+源码位置：
+```
+/home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf_traffic/DetectConflict.cpp:671
+```
+含义是：
+
+- footprint：机器人实际占据的空间；
+- vicinity：机器人希望周围保持的安全空间。
+
+因此，只要 A 的实体进入 B 的安全范围，或者 B 的实体进入 A 的安全范围，就可以判定冲突。
+
+如果 vicinity == footprint，两者就退化为普通的实际几何碰撞检查。
+
+如果 profile 没有设置 vicinity，代码会自动把 footprint 作为 vicinity：
+```
+if (!output.vicinity)
+output.vicinity = output.footprint;
+```
+### 7. 起点已经很近时的特殊处理
+
+between() 先检查两个 segment 的起始状态是否已经处于彼此 vicinity 内：
+```
+if (close_start(...))
+return detect_approach(...);
+```
+如果机器人一开始就很近，函数不会简单地把“已经在安全范围内”立刻报告为冲突，而是判断它们是否继续靠近。
+
+这样可以允许：
+```
+两个机器人初始停在一起
+其中一个随后驶离
+```
+否则机器人刚启动时就会因为初始距离较近而永远产生冲突。
+
+如果初始距离足够远，则使用 detect_invasion()，检测后续是否有机器人侵入另一台机器人的 vicinity。
+
+源码位置：
+```
+/home/jazzy/rmf_ws/src/rmf/rmf_traffic/rmf_traffic/src/rmf_traffic/DetectConflict.cpp:934
+```
+### 8. 一个直观例子
+
+假设两个圆形机器人半径均为 0.3 m，vicinity 半径为 0.8 m。
+
+#### 轨迹
+
+机器人 A：
+t=0   (-5, 0)
+t=10  ( 5, 0)
+
+机器人 B：
+t=0   (0, -5)
+t=10  (0, 5)
+
+两台机器人都在 10 秒内经过中心点 (0, 0)。
+
+函数大致执行：
+
+1. 发现两条轨迹的时间区间都是 0..10，存在时间重叠。
+2. 为两条直线段分别生成样条运动。
+3. 计算运动范围包围盒，发现它们可能相交。
+4. 使用 FCL 连续检查：
+    - A 的半径 0.3 是否进入 B 的半径 0.8 安全区；
+    - B 的半径 0.3 是否进入 A 的半径 0.8 安全区。
+
+5. 当中心距离小于：
+```
+0.3 + 0.8 = 1.1 m
+```
+时，报告冲突。
+6. 返回：
+```
+Conflict {
+a_it,       // A 所在的 segment
+b_it,       // B 所在的 segment
+time        // 首次进入冲突状态的时间
+}
+```
+如果只把实际碰撞作为标准，则阈值约为：
+```
+0.3 + 0.3 = 0.6 m
+```
+但 RMF 通常还会通过 vicinity 提前发现安全距离不足。
+
+### 9. 在 Node.cpp 中如何使用结果
+
+Node.cpp 只关心返回值是否为空：
+```
+if (found_conflict.has_value())
+{
+conflicts.push_back({participant, vc->participant});
+}
+```
+因此整体逻辑是：
+```
+同一地图
++ 没有被依赖关系忽略
++ 时间区间重叠
++ footprint/vicinity 连续几何运动发生接近
+= schedule conflict
+```
+检测结果随后用于 Traffic Schedule 的冲突集合和 negotiation 流程。DetectConflict::between() 本身不会向机器人发送停止命令，也不会自动生成替代路径。
+
+
+## rmf_traffic::DetectConflict::between(...) 是检测轨迹是否产生重叠，但初始提交的轨迹是如何产生的
+• 初始提交的轨迹不是由 DetectConflict::between() 生成的，而是由 Fleet Adapter 内的路径规划器生成的。DetectConflict 只负责验证或发现已提交轨迹之间的时空冲突。
+
+整体链路是：
+```
+任务目标
+-> Fleet Adapter 取得机器人当前位置
+-> rmf_traffic::agv::Planner 生成带时间的路径
+-> 转换为 itinerary（一个或多个 Route）
+-> Schedule Participant 提交到 Traffic Schedule
+-> DetectConflict 检查与其他 itinerary 的冲突
+-> 有冲突则 negotiation 后重新生成/替换 itinerary
+```
+以你的 patrol 任务为例：
+```
+ros2 run rmf_demos_tasks dispatch_patrol -p coe lounge -n 3 --use_sim_time
+```
+某台机器人被分配到 coe -> lounge 这一段时，adapter 会得到：
+```
+当前状态：
+时间：t0
+位置：coe 对应的导航图 waypoint
+朝向：当前机器人 yaw
+
+目标：
+lounge 对应的导航图 waypoint
+```
+然后调用 rmf_traffic::agv::Planner。它的输入主要是：
+
+- 导航图：building map 导出的 waypoint、lane、地图名、单向限制、门、电梯、等待点等；
+- 机器人运动参数：最大线速度、角速度、加速度、减速度；
+- 机器人 profile：footprint 和 vicinity；
+- 当前时刻、当前位置、朝向；
+- 目标 waypoint；
+- 当前 Traffic Schedule 快照或 negotiation 的约束。
+
+规划器在导航图中搜索可走路线，并为每一段 lane 计算实际通过时间。它生成的不是简单几何折线，而是带时间戳、位姿、速度的 Trajectory：
+```
+t0       coe，静止
+t0 + 1s  原地转向
+t0 + 5s  经过走廊中的 waypoint
+t0 + 9s  到达 lounge 前
+t0 + 10s lounge，静止
+```
+每条轨迹元素大致是：
+```
+(time, [x, y, yaw], [vx, vy, vyaw])
+```
+同一张地图上的连续轨迹会组成一个 Route：
+```
+rmf_traffic::Route {
+map = "L1",
+trajectory = ...
+}
+```
+整段任务可能形成多个 Route，例如跨楼层时会按不同地图拆分；这些 route 的集合就是 itinerary。随后 adapter 通过其 ScheduleParticipant 调用类似：
+```
+participant.set_itinerary(plan_id, itinerary);
+```
+提交给 Traffic Schedule。
+
+关键区别是：
+```
+Planner：
+“从当前位置到目标，按车辆运动能力，预计怎样走、何时到？”
+
+DetectConflict：
+“这条预计轨迹和其他已提交的预计轨迹会不会在同一时刻太接近？”
+```
+初始规划时通常已经会参考当前 schedule，尽量避开已有 itinerary。例如走廊被另一台机器人在 t0+5s ~ t0+15s 占用，规划器可能选择：
+```
+方案 A：改走另一条 lane
+方案 B：在 coe 等待 10 秒后再进入走廊
+```
+但多机器人可能同时产生初始计划，或运行中出现延迟、任务变更。因此初始 itinerary 提交后，Schedule 仍会做冲突检测；发现冲突则触发 negotiation，adapter 以新的时间约束或禁行约束再次调用 planner，生成替代 itinerary 并替换旧计划。
+
+对应源码职责可从这些模块理解：
+
+- rmf_traffic/agv/Planner：导航图搜索、运动时间计算、生成 Route/Trajectory。
+- rmf_fleet_adapter：把任务、机器人状态和 planner 串起来，并执行/提交 itinerary。
+- rmf_traffic_ros2/schedule/Node.cpp：维护 schedule、找出已提交 itinerary 的冲突。
+- DetectConflict::between()：两个具体 trajectory 的连续时空几何检测。
+
+真实机器人中“当前位置”来自定位系统或 Fleet Manager；office demo 中则来自 Gazebo 仿真状态经 demo fleet adapter 上报。启动时若看到静止或保留轨迹，通常是 adapter 为机器人当前位置提交的 hold/空闲状态；真正让机器人移动的轨迹，通常在任务被分配后才由 planner 产生。
+
+
+## RMF Traffic Schedule 进行协商 "Robot1 和 Robot2 的当前计划在走廊发生时空冲突，请协商。"
+两个 robot fleet adapter 根据各自的任务、当前位置、电量、预计完成时间等，给出替代方案。例如：
+```
+Robot1 提案：按原计划通过走廊
+Robot2 提案：在 B 前的 holding point 等待 10 秒，之后再进入
+```
+但考虑实际情况，如果出现 1:
+```
+Robot1 提案：按原计划通过走廊
+Robot2 提案：按原计划通过走廊
+```
+2:
+```
+Robot1 提案：在 A 前的 holding point 等待 10 秒，之后再进入
+Robot2 提案：在 B 前的 holding point 等待 10 秒，之后再进入
+```
+这类情况，如何处理？
+因为各个 robot fleet adapter 只会考虑自己这个 robot，其他 robot 的提案只有 fleet adapter 知道。
+另外为什么不直接由 RMF Traffic Schedule 进行总体协商？
+
+
+• 核心点是：RMF 的协商不是“两个 adapter 各自提交一次方案，然后 Traffic Schedule 从两份方案中挑一个”。它是一个由 Traffic Schedule 组织的、按候选方案逐步展开的分布式协商协议。
+
+每个 adapter 虽然只负责自己的机器人，但在协商过程中会看到协商表中已经提交的其他参与者方案。它提交的也不是一句“我等待 10 秒”，而是自己的完整候选 itinerary，也就是带时间戳的完整轨迹。
+
+### 协商中谁做什么
+
+可以把角色分成三层：
+```
+Traffic Schedule / Negotiation Manager
+    负责发现冲突、建立协商、传递候选方案、判断方案是否仍冲突
+
+Robot1 Fleet Adapter / Negotiator
+    负责生成 Robot1 的候选 itinerary
+
+Robot2 Fleet Adapter / Negotiator
+    负责生成 Robot2 的候选 itinerary
+```
+Traffic Schedule 通常不会替机器人决定“Robot1 应该等，还是 Robot2 应该等”，因为它并不知道：
+
+- Robot1 的任务优先级；
+- Robot2 是否电量不足；
+- 某个 fleet 是否允许倒车；
+- 某个 holding point 是否适合该车型；
+- 任务的截止时间和业务代价；
+- fleet adapter 内部的控制能力。
+
+它只负责协议和安全判定：候选轨迹放在一起后是否仍有冲突。
+
+### 情况 1：两个机器人都坚持原计划
+
+例如：
+```
+Robot1：原计划通过走廊
+Robot2：原计划通过走廊
+```
+Traffic Schedule 会把两个 itinerary 放在同一个协商表中，并再次执行冲突检测：
+```
+DetectConflict(Robot1 原计划, Robot2 原计划)
+    => 仍然冲突
+```
+因此这个方案不能被接受。
+
+之后协议会要求参与者继续提交替代方案。例如：
+```
+Robot1：原计划
+Robot2：等待 10 秒后再走
+```
+或者：
+```
+Robot1：等待 10 秒后再走
+Robot2：原计划
+```
+如果某个 adapter 反复提交原计划，协商分支就无法解决冲突，最终会出现：
+
+- 该协商分支被判定为失败；
+- 协商超时或参与者放弃该分支；
+- fleet adapter 重新规划；
+- 任务进入失败、等待或需要人工处理的状态。
+
+重要的是：协商失败时，系统不会把两个仍然冲突的方案当成成功方案下发给机器人。
+
+### 情况 2：两个机器人都等待 10 秒
+
+例如：
+```
+Robot1：在 A 前等待 10 秒
+Robot2：在 B 前等待 10 秒
+```
+这不一定能解决冲突。
+
+假设原计划如下：
+```
+Robot1：10:00:00 进入走廊
+Robot2：10:00:00 进入走廊
+```
+两者都等待 10 秒后：
+```
+Robot1：10:00:10 进入走廊
+Robot2：10:00:10 进入走廊
+```
+它们仍然在同一时间占用走廊，因此：
+```
+DetectConflict(Robot1 等待后的轨迹,
+                Robot2 等待后的轨迹)
+    => 仍然冲突
+```
+这个候选组合会被拒绝。
+
+但如果等待策略不同，例如：
+```
+Robot1：原计划，10:00:00 通过
+Robot2：等待 10 秒，10:00:10 通过
+```
+并且 Robot1 已经完全离开走廊，那么两条轨迹的空间占用时间不重叠：
+```
+DetectConflict(...)
+    => 无冲突
+```
+这个候选组合才可能被接受。
+
+所以 Traffic Schedule 判断的不是“两个方案看起来是否合理”，而是把完整轨迹组合起来重新进行时空检测。
+
+### Robot adapter 怎么知道其他机器人的方案
+
+不是只有 Robot1 知道 Robot1 的提案、Robot2 知道 Robot2 的提案。
+
+协商过程中的某个参与者会看到类似这样的表：
+
+当前协商表：
+```
+Robot1:
+itinerary_0 = 原计划
+
+Robot2:
+itinerary_0 = 等待 10 秒后的计划
+```
+当轮到 Robot1 响应时，它可以根据表中 Robot2 的 itinerary 生成自己的替代方案：
+```
+Robot1:
+candidate_0 = 原计划
+candidate_1 = 等待 5 秒
+candidate_2 = 改走另一条 lane
+```
+然后 Traffic Schedule 会将这些候选组合继续检查。
+
+因此 adapter 不需要预先知道对方“打算怎么做”，但在协商协议中会逐步看到已经提交的对方候选轨迹，并针对它进行响应。
+
+### 这实际上是一个搜索过程
+
+可以把协商抽象成：
+```
+冲突：
+R1 原计划 + R2 原计划
+
+尝试分支 1：
+R1 原计划 + R2 等待 10 秒
+-> 无冲突，成功
+
+尝试分支 2：
+R1 等待 10 秒 + R2 原计划
+-> 无冲突，成功
+
+尝试分支 3：
+R1 等待 10 秒 + R2 等待 10 秒
+-> 仍冲突，失败
+
+尝试分支 4：
+R1 改道 + R2 原计划
+-> 无冲突，成功
+```
+Traffic Schedule/Negotiation Manager 负责管理这些分支和参与者顺序；每个 adapter 负责为自己的机器人产生候选 itinerary。
+
+最终接受的是一个满足以下条件的完整组合：
+```
+每个参与者都有一个有效 itinerary
+所有 itinerary 两两之间无未解决冲突
+满足依赖关系和协商约束
+```
+### 为什么不让 Traffic Schedule 统一规划所有机器人
+
+主要是职责和信息边界不同。
+
+Traffic Schedule 擅长的是：
+```
+维护全局时间空间占用记录
+检测冲突
+组织协商
+管理依赖和参与者状态
+```
+但它不应该负责：
+```
+理解每种机器人底盘的运动学
+知道每个 fleet 的控制接口
+决定电量不足的机器人是否必须充电
+判断某个 holding point 是否可停
+处理机器人无法倒车、无法原地旋转等限制
+优化任务优先级和业务成本
+```
+这些信息通常只存在于 fleet adapter 或 fleet manager 内部。
+
+例如同一个冲突：
+```
+Robot1：可以原地旋转，等待成本低
+Robot2：不能倒车，且电量低，必须优先完成任务
+```
+对 Traffic Schedule 来说，两条轨迹只是几何和时间对象；它无法可靠判断哪台机器人更适合等待。由各自 adapter 生成候选方案，才能使用本 fleet 的真实能力和业务规则。
+
+因此 RMF 采用的是：
+```
+Schedule 负责全局一致性和安全验证
+Adapter 负责本机器人候选方案和执行能力
+```
+Traffic Schedule 不是完全被动的。它实际上掌握全局冲突信息，并负责协调协商流程；只是它不替所有 fleet 做具体路径优化。
+
+最后要注意：DetectConflict::between() 只检测给定的两条轨迹，不负责协商本身。协商流程发现某个候选仍冲突时，会退回给相应的 negotiator 生成另一个候选 itinerary。只有在整个候选组合无冲突后，新的 itinerary 才会被正式提交并用于机器人执行。
+
+
+## 刚才说的这种冲突协商方式，意味着机器人 A 要获取到机器人 D 提交的 itinerary (D 必须在时间上先于 A 提交 itinerary)。如果 A、D 是一起提交 itinerary，那么很可能产生新冲突。我这样理解是否正确？
+
+• 你的理解对了一半，需要区分“初始 itinerary 提交”和“进入 negotiation 后的提案提交”。
+
+初始提交阶段确实可能出现你说的竞态：
+```
+t0：A 和 D 都读取 Schedule 版本 100
+t1：A 根据版本 100 规划 itinerary_A
+t1：D 根据版本 100 规划 itinerary_D
+t2：A、D 几乎同时提交
+t3：Schedule 发现 itinerary_A 与 itinerary_D 冲突
+```
+因为 A 规划时看不到 D 尚未提交的轨迹，D 同样看不到 A。两份单独看都合法的 itinerary，组合起来可能冲突。这是 RMF 预期要由后续 negotiation 处理的情况。
+
+不过在 negotiation 阶段，不要求现实时间上“D 必须先发布正式 itinerary，A 才能规划”。Traffic Schedule 会建立一张有顺序、有版本的协商表。
+
+例如某个协商分支中：
+```
+A 提交候选 A1
+    ↓
+D 收到包含 A1 的协商表
+    ↓
+Schedule 检查 A1 + D1
+```
+如果 A1 + D1 冲突，D 可以拒绝这个分支，或者协议换一个分支：
+```
+D 提交候选 D2
+    ↓
+A 针对 D2 提交候选 A2
+    ↓
+Schedule 棏查 A2 + D2
+```
+这里的“先后”是某个 negotiation 分支中的逻辑顺序，不是要求机器人初始计划必须永久按固定顺序提交。
+
+可以理解为：
+```
+初始 itinerary：
+    允许并发提交
+    允许因为旧 Schedule 快照而产生冲突
+
+协商候选 itinerary：
+    按协商表逐层提交
+    后响应者能够看到该分支中前面参与者的候选
+    整个候选组合无冲突才算协商成功
+```
+即使协商成功后，又有第三台机器人 E 并发提交了新 itinerary，导致：
+```
+A2 + D2 无冲突
+但 A2 + E1 冲突
+```
+Schedule 仍会检测到这个新冲突，并启动新的协商。RMF Traffic Schedule 更接近“带版本和冲突恢复机制的乐观并发协调”，而不是把整个场地加锁后一次性规划所有机器人。
+
+因此不能保证“任何时刻都绝不会有人提交冲突 itinerary”，它保证的是：
+1. 所有 itinerary 最终进入同一个 Schedule。
+2. 冲突能够被全局检测。
+3. 协商候选必须针对已知提案进行验证。
+4. 冲突候选组合不能被当作成功协商结果。
+5. 因并发更新产生的新冲突会再次触发协商。
+
+还要区分“提交计划”和“实际进入冲突区域”。机器人可以先发布预计轨迹，但 adapter 会根据协商结果、依赖关系和时间进度控制实际执行。RMF 的目标不是禁止冲突计划短暂出现在 Schedule 中，而是阻止机器人按照尚未解决的冲突计划同时占用危险区域。
