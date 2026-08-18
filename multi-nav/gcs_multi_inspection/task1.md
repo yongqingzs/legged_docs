@@ -612,3 +612,192 @@ INSPECTION_CONFIG=configs/zju2_2.json \
 .venv/bin/python Inspection_wrapper.py
 ```
 Output 路径不按照 json 所示""output_root": "output/zju2_2_wgs84/""输出了
+
+9. 我使用 tmp/input.zip 在宿主机上进行请求
+```
+curl -X POST http://10.0.40.55:18080/v1/plan \
+  -F package=@input.zip \
+  -F 'request={"algorithmCode":"gcs_multi_inspection","callType":"async","requestId":"manual-test-001"}'
+```
+发现直接"ValueError: could not convert string to float: 'null'\n" "，是哪里(GCS_Multi_Inspection_MIBNB 还是 input.zip)的问题?
+
+
+## task4
+这是另一个作者给我的两个文件 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/patch，这是他的解释:
+```
+@Good juice 自动内缩的代码初步实现了一下，需要新安装shapely和triangle两个包。因为只要输入原来的Regions.csv就能返回新的csv，是比较独立的模块所以我直接这样发你吧。大概思路是把原本的regions取并集，然后用shapely库里面的buffer函数对整个并集形状进行收缩，然后用triangle库进行三角网格分解，再对分解后的三角形进行合并减少凸集数量。
+```
+请评估如何集成，并不能影响现有功能
+
+问题：
+1. 当前多机协同算法会在分配任务点之间生成轨迹，但现在中间点较多，导致下层导航会中间多次"停顿"，你有什么好的方案: a. 减少插点间隔 b. 或其他，你有什么建议
+
+2. 现在生成点位很多是直线上的点，能否增加新模式，必要处才生成点位(checkpoints、拐点)，而直线上的点不生成
+
+3. 当前生成的 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/output/zju2_2_wgs84/20260814_011905_798955/intensive_waypoints/llh_wgs84/Depot0_intensive_waypoints_llh.csv 符合只在必要点生成的需求吗，为什么像 7 和 1 之间有 5 个点，请解释。
+
+### 4. 有一定转角是符合期望的，因为要保证路径在可行区域里。但我在地图上查看，发现有的点很密集，这是否符合期望。但不能粗暴地从7直接到1，可能会导致点位不在可行区域。请评估，给出"waypoint_export_mode": "key_points"的修改意见。
+
+• 已完成 key_points 的安全简化实现。
+    - 仅当两点的直连线完全被 Regions.csv 的可飞区域并集覆盖时，才移除中间点。
+    - checkpoint 始终保留为强制锚点，不会跨越。
+    - 同一时刻、相距不超过 1 cm 的数值交接点合并，优先保留 CheckpointX 标签。
+    - 默认 dense 模式不变。
+    - 实现位于 /home/jazzy/py/GCS_Multi_Inspection_MIBNB/Inspection_wrapper.py:697，说明更新于 /home/jazzy/py/GCS_Multi_Inspection_MIBNB/README.md:59，并新增了直连、L 型通道、checkpoint、交接点测试。
+
+验证通过：
+- 36 项单元测试通过。
+- zju2_2 的完整 key-points 运行成功，输出在 /tmp/gcs_visibility_keypoints/zju2_2/20260814_015534_571666。
+- 已确认 Depot0 的 Checkpoint7 -> Checkpoint1 被直接导出，且该直线完全位于 Region 并集内。
+- power_plant 的 dense 回归运行成功，输出在 /tmp/gcs_visibility_keypoints/power_plant_dense/20260814_015740_831935，记录模式为
+dense。
+
+额外发现：该场景原始低层轨迹有一段在 trajectory_round_digits=2 舍入后约 3.9 cm 落到 Region 并集外；它不是本次 shortcut 删除点造成的。本次修改保证新增快捷连线不会越界，不会改写原始低层轨迹。
+
+5. 运行 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/zju2_2.json，发现 ""return_to_depot": true" 这个参数下，depot 会沿着 checkpoint 返回起点，这样合理吗？不会多绕路吗？请分析。
+
+6. 我本来设想的是""return_to_depot": true"只管回到 depot 起始点，但不会管回去是否经过 checkpoints。当前似乎不符合这个逻辑，请客观评估我的想法。
+
+• 你的设想是合理的，但它与当前实现的优化目标不同。
+
+你想要的是：
+```
+先按“开路线”决定巡检顺序：
+Depot -> Checkpoint... -> 最后一个 Checkpoint
+```
+然后只追加一段：
+```
+最后一个 Checkpoint -> Depot
+```
+回程可以经过任何可飞区域，物理上即使经过某个 checkpoint 也不表示重新巡检；不应为了回库而改变原本的巡检顺序。
+
+当前 return_to_depot: true 的语义则是：
+```
+直接求最短闭环：
+Depot -> Checkpoint... -> Depot
+```
+Depot 从一开始就参与 TSP 闭环优化，所以“哪个 checkpoint 最后访问”会受回库成本影响。这是数学上总闭环距离更短的方案，但不符合“先完成巡检任务，再单独返航”的业务语义。
+
+需要澄清的是：当前低层实现并没有要求返航必须“依次经过 checkpoints”。它只规划最后一个 checkpoint 到 Depot 的可行路径；若地图的可飞走廊使它与此前路径或某些 checkpoint 附近重合，这是几何上的路径重叠，不是重新安排了巡检任务。
+
+客观上有三种应明确区分的模式：
+
+| 模式 | 巡检顺序是否受返航影响 | 总航程 |
+|---|---|---|
+| `open` | 否，不返航 | 最短 |
+| 当前 `return_to_depot: true`，即 `closed_optimal` | 是 | 闭环总航程最短 |
+| 设想的 `open_then_return` | 否，返航仅追加 | 通常不小于闭环最优 |
+
+如果业务要求是“巡检优先，结束后回库”，建议增加独立模式 open_then_return，不要继续用布尔值表达三种不同语义。这样可以保留现有 closed_optimal，也不会改变 return_to_depot: false 的行为。
+
+
+## task5
+### 如何在宿主机(juice@10.0.40.55 密码: 123456)导出 GCS_Multi_Inspection_MIBNB 的 docker 镜像到宿主机 /data/images_store 下
+```
+docker build -t gcs-multi-inspection:latest .
+docker stop gcs-multi-inspection-test
+docker rm gcs-multi-inspection-test
+
+docker run -d \
+--name gcs-multi-inspection-test \
+-p 18080:8080 \
+-e INSPECTION_JOB_TIMEOUT=3600 \
+-e INSPECTION_JOB_WORKERS=2 \
+gcs-multi-inspection:latest
+```
+```
+sudo docker save -o /data/images_store/gcs-multi-inspection_0812.tar gcs-multi-inspection:latest
+
+sudo chown $USER:$USER gcs-multi-inspection_0812.tar 
+```
+
+
+## task6
+查看 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/变电站打点2.ovjsn，每一行都是一个区域，用的 CGCS2000 坐标系
+```
+b.2-1、2、3、4
+b.2-5、6、7、8
+b.2-9、10、11、12
+b.2-13、14、15、16
+
+b.2-3、4、8、5
+b.2-8、7、10、9
+b.2-9、12、14、13
+b.2-13、16、1、4
+```
+输出类似 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/二期打点1_regions.txt 的文件，供奥维地图使用
+
+```
+python3 tools/ovjsn_to_regions.py --ovjsn tmp/变电站打点2.ovjsn --groups tmp/变电站打点2_region_groups.txt --output tmp/变电站打点2_regions.txt
+```
+
+问题:
+1. 需要继续生成相关文件(参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant_wgs84)，生成在 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power2_wgs84，说明:
+- 需要 5 个文件
+```
+Boundary.csv
+Checkpoints.csv
+Depots.csv
+Origin.csv
+Regions.csv
+```
+- Boundary.csv 就是 b.2-2、b.2-6、b.2-11、b.2-15
+- Origin.csv 就是 Boundary 的中心点: "119.97507781,30.32525363"
+- Regions.csv 参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/变电站打点2_regions.txt 你生成的区域
+- Depots.csv  1 个机器人，符合要求即可
+- checkpoints.csv: 4 个点，在区域里即可
+
+```
+INSPECTION_CONFIG=configs/zju2_2.json \
+.venv/bin/python Inspection_wrapper.py
+```
+
+问题:
+1. @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/0817/intensive_waypoints/llh_wgs84/x30-b_intensive_waypoints_llh.csv 为什么只生成了一个点位
+
+• 原因已确认：这是 key_points 导出逻辑的缺陷，不是规划只生成了一个巡检点。
+
+该运行实际已分配并规划了 10 个巡检点，TSP 路线也完整，低层轨迹有 200 个原始 waypoint，见 /home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/0817/planning_results.json:9。
+
+问题在于当前 key_points 用名称前缀判断 checkpoint：
+```
+str(vertex).startswith("Checkpoint")
+```
+见 /home/jazzy/py/GCS_Multi_Inspection_MIBNB/Inspection_wrapper.py:693。但这批输入的 checkpoint 名称是：
+```
+point_1786953260875_byygj1
+...
+```
+并不以 Checkpoint 开头。因此导出器把全部 10 个实际巡检点都误当成普通中间点；可见性简化将它们整体删掉，只保留轨迹首尾，才产生当前 CSV 中仅两行记录：
+```
+Polygon22, t=0
+x30-b, t=865.775...
+```
+其中第一行本应是 Depot x30-b，却显示为 Polygon22，是另一处相同根因：同一时刻的交接点去重只优先保护名为 Checkpoint* 的点，因此用 Polygon22 覆盖了 Depot 起点标签。
+
+所以这份文件不是“只有一个规划点”，而是“10 个巡检锚点在 key-points 导出时被错误删除”。return_to_depot: true 不是主因。
+
+正确修复不应依赖命名规则，而应将实际的 checkpoints_nh.keys() 显式传给导出器：
+
+- 通过集合成员关系判断是否为 checkpoint；
+- 强制保留首、尾 Depot 和所有 checkpoint；
+- 同时更新同一时刻交接去重的优先级；
+- 增加使用 point_* 这类自定义名称的回归测试，确保导出的 checkpoint 顺序与 TSP 路线一致。
+
+
+2. 当前通过 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB 构建的容器，我发现容器内部没有实时算法运行日志，是否成功/运行失败等没有记录，如:
+```
+{"code":200,"jobId":"e185bd77-0b16-4ffe-b036-c81afb638e13","status":"failed","error":"Traceback (most recent call last):\n  File \"/app/Inspection_wrapper.py\", line 1031, in <module>\n    backgroundG, sets, vertices, edges, l, depots_in, checkpoints_in = graph_construction(\n                                                                       ^^^^^^^^^^^^^^^^^^^\n  File \"/app/Inspection_wrapper.py\", line 403, in graph_construction\n    raise ValueError(\nValueError: Every depot and checkpoint must belong to at least one Region; unassigned objects: depot x30-b at ENU (-5650062.593584, 1261652.407680)\n"}%
+```
+不会记录，你有什么好的实现思路。
+
+3. 我在宿主机(juice@10.0.40.55 密码: 123456)上已经成功运行容器(gcs-multi-inspection:test)，请在上面验证(curl)你刚才的两个修改是否有效，并告诉我有效的证据，使用该 input 验证: @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/0817/pw0817_input.zip
+
+4. 你在宿主机的 @/home/juice/py/GCS_Multi_Inspection_MIBNB 下重建容器并测试，是未更新还是实现的问题
+
+5. 需要连接算法中心服务器 ssh zhuqilong@47.99.202.196 -p 2222(密码: fhzn@1234)
+```
+curl --location 'http://47.99.202.196:20046/multiMachineCollaboration/algorithm/execute' \
+    --form 'file=@"/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/0817/pw0817_input.zip"' \
+    --form 'algorithmCode="gcs_multi_inspection"' | jq
+```
