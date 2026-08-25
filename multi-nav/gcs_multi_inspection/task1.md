@@ -801,3 +801,79 @@ curl --location 'http://47.99.202.196:20046/multiMachineCollaboration/algorithm/
     --form 'file=@"/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/0817/pw0817_input.zip"' \
     --form 'algorithmCode="gcs_multi_inspection"' | jq
 ```
+
+6. @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/data/scenarios/power1_wgs84/input/Regions.csv 中有四个点位置移动了，请根据所给信息调整
+```
+原先:
+c1: 119.97571879,30.32767258
+c2: 119.97572815,30.32764710
+c3: 119.97576027,30.32764932
+c4: 119.97575492,30.32767943
+
+现在:
+c1: 119.97574300,30.32767415
+c2: 119.97574568,30.32764521
+c3: 119.97578725,30.32765216
+c4: 119.97578189,30.32767994
+```
+
+## task7
+(我调整了点位)查看 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/变电站打点1.ovjsn，以下每一行都是一个区域，用的 CGCS2000 坐标系(t1-10 不是区域，是 chekpoints)
+```
+1、2、4、3
+5、6、7、8
+9、10、11、12
+13、14、15、16
+17、18、19、20
+21、22、23、24
+
+2、4、5、6
+1、2、12、9
+10、11、20、17
+11、12、13、14
+14、15、24、21
+6、7、16、13
+3、4、26、25
+```
+输出类似 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/二期打点1_regions.txt 的文件，供奥维地图使用
+
+```
+python3 tools/ovjsn_to_regions.py --ovjsn tmp/变电站打点1.ovjsn --groups tmp/变电站打点1_region_groups.txt --output tmp/变电站打点1_regions.txt
+```
+
+问题:
+1. 需要继续生成相关文件(参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power_plant_wgs84)，生成在 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/data/scenarios/power1_wgs84(覆盖原文件)，说明:
+- 需要 5 个文件
+```
+Boundary.csv
+Checkpoints.csv
+Depots.csv
+Origin.csv
+Regions.csv
+```
+- Boundary.csv 就是 3、18、23、8
+- Origin.csv 就是 Boundary 的中心点: "119.97507781,30.32525363"
+- Regions.csv 参考 @/home/jazzy/py/GCS_Multi_Inspecton_MIBNB/tmp/变电站打点1_regions.txt 你生成的区域
+- Depots.csv  2 个机器人，符合要求即可
+- checkpoints.csv: @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/二期打点1_regions.txt 中 t1-10
+
+```
+INSPECTION_CONFIG=configs/zju2_2.json \
+.venv/bin/python Inspection_wrapper.py
+```
+
+
+## task8
+同样是 power1_wgs84 这个 input 包，但是 depot 位置变为:
+```
+A: 119.97557594311763, 30.325583739635288
+B: 119.97556028679548, 30.325576899573885
+```
+
+我基于 power1_wgs84 建立了 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/tmp/input_0818.zip，除了更改了 depots 位置，其他应该一致。但出现"RuntimeError: MIBNB remained numerically unknown after objective scales [1.0, 0.5, 0.1, 0.05, 0.01]: Unknown result. The problem is not optimal, infeasible, nor unbounded."请核实原因，是 input.zip 的问题吗
+
+
+## task9
+@/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/power1_wgs84.json 我运行这个 config，发现运行结果和直观最短路径分配结果(a、b 两狗一狗一边，而不是交叉)不一致，请分析原因和你的想法
+
+我指的是直观最短路径分配是针对 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/power1_wgs84.json 这个场景: "a一边，b一边"，总路径长度会最短，为什么没这么分配？而不是要他们一定分区
