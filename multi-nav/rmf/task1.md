@@ -171,3 +171,554 @@ RMF 用 map 名隔离楼层二维坐标；
 用设备会话控制电梯资源；
 用 itinerary 的分段 Route 在各楼层进行 Traffic Schedule 协调。
 ```
+
+# task1
+问题:
+## 1. @/home/jazzy/rmf_ws/src/demonstrations/rmf_demos/rmf_demos_maps/maps/office 中为什么有 scan.png 和 png 两种地图样式，而 @/home/jazzy/rmf_ws/src/demonstrations/rmf_demos/rmf_demos_maps/maps/hotel 只有一种
+2. scan 是给 nav2 用的？为什么 hotel 这个场景没有用？rmf 底层导导航没有用 nav2 吗？
+
+• 1. office 的两张图片不是两套 RMF 导航地图，而是 Building Map Editor 中的两类图层：
+```
+office.png       L1 的 drawing（底图/建筑平面图）
+office_scan.png  名为 office_laserscan 的附加图层
+office_scan.png 是灰度激光扫描地图，并且 YAML 给了它相对 RMF 楼层坐标的标定变换：
+
+layers:
+office_laserscan:
+    filename: office_scan.png
+    transform:
+    scale: ...
+    translation_x: ...
+    translation_y: ...
+    yaw: ...
+```
+见 rmf_demos_maps/maps/office/office.building.yaml:90。
+
+office.png 是 3047×1717 的 RGBA 平面图；office_scan.png 是 335×447 的灰度栅格图。后者的用途是把实机激光 SLAM/定位所用的环境地图，对齐到 RMF 的 Building Map，以便人工绘制 navigation graph 时可参考真实障碍物和墙体。
+
+Hotel 不是“没有 layer 机制”，而是它的每个 level 没有额外图层：
+```
+layers: {}
+```
+见 rmf_demos_maps/maps/hotel/hotel.building.yaml:100。
+
+它只有各层的 drawing：
+```
+hotel_L1.png
+hotel_L2.png
+hotel_L3.png
+```
+原因很简单：hotel demo 是以 Gazebo 建筑模型和多楼层/电梯调度为重点构造的仿真场景，没有配套导入一张真实机器人采集的 laser scan 栅格图；office demo 则额外演示了“将实机扫描地图与 RMF 建筑图对齐”的工作流。
+
+2. office_scan.png 可以作为 Nav2 静态地图的源素材，但在你运行的 RMF demos 中，它并没有被 Nav2 的 map_server 或 Nav2 navigation stack 消费。
+
+如果是 Nav2 标准静态地图，通常还需要一个 map YAML，例如：
+```
+image: office_scan.png
+resolution: 0.05
+origin: [x, y, yaw]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25
+```
+然后启动：
+```
+nav2_map_server / map_server
+AMCL
+planner_server
+controller_server
+```
+当前 demo 中搜索不到 Nav2 / map_server 的 launch 或配置；office_scan.png 只在 building YAML 的 layer 中出现。因此不能说“office demo 使用 scan.png 驱动 Nav2”。
+
+RMF 也不“底层必须使用 Nav2”。职责关系是：
+```
+RMF：
+用 nav graph 的 waypoint/lane 做任务级路径规划、交通时刻表与多机协调。
+
+Nav2：
+某台机器人自身的定位、局部避障、
+栅格全局路径和底盘控制。
+```
+RMF 的 rmf_traffic::agv::Planner 使用的是从 Building Map 导出的拓扑导航图，而不是 office_scan.png 的占据栅格。它生成的结果是：
+```
+waypoint/lane 序列
++ 预计通过时间
++ Route / Trajectory
+```
+例如 office launch 向 fleet adapter 提供的是：
+```
+.../maps/office/nav_graphs/0.yaml
+```
+见 rmf_demos/launch/office.launch.xml:18。
+
+在当前 Gazebo demo 中，adapter 最终把目标点和楼层名发给 mock fleet manager：
+```
+api.navigate(robot_name, cmd_id, pose, map_name)
+```
+它再发布 robot_path_requests，见 rmf_demos_fleet_adapter/rmf_demos_fleet_adapter/fleet_manager.py:232。这条执行链不是 Nav2。
+
+真实部署时，常见架构则是：
+```
+Building Map / nav graph
+-> RMF：任务分配、跨楼层、电梯、交通协调
+-> Fleet Adapter：把 RMF waypoint 目标转换为厂商命令
+-> Nav2 或厂商导航栈：基于 scan/地图定位、避障、行驶到目标
+```
+所以 hotel 即使没有 hotel_L1_scan.png，RMF 仍然可正常规划和协调；只要其 fleet adapter 能在真实系统中把 L1/L2/L3 的 RMF 坐标与机器人自身导航地图/定位系统对应起来即可。
+
+问题:
+1. 也就是在 demo 里没有实际导航，而是 mock 导航(假装到达点位)
+2. @/home/jazzy/rmf_ws/src/demonstrations/rmf_demos/rmf_demos_maps/maps/hotel/hotel.building.yaml 是什么用途，是如何得到的？
+3. @/home/jazzy/rmf_ws/src/demonstrations/rmf_demos/rmf_demos_maps/maps/hotel/hotel_L1.png 是如何得到的？
+
+• 1. 对，但更准确说是“仿真执行器”，不是纯粹瞬移或只回报到达。
+
+在 rmf_demos_gz 中，机器人使用 RMF 的 slotcar 仿真插件，而不是 Nav2：
+```
+RMF Fleet Adapter
+-> Fleet Manager
+-> /robot_path_requests
+-> Gazebo slotcar plugin
+-> 仿真机器人按给定路径/速度移动
+```
+slotcar 订阅 /robot_path_requests，源码见 /home/jazzy/rmf_ws/src/rmf/rmf_simulation/rmf_robot_sim_common/src/slotcar_common.cpp:227。
+
+所以机器人在 Gazebo 中确实会连续地移动、转向、占据空间，也会报告状态；但它不做真实机器人常见的：
+```
+激光 SLAM / AMCL 定位
+栅格代价地图
+Nav2 全局规划
+Nav2 局部避障与恢复行为
+```
+它接受的是 RMF 侧已经决定好的 path request，按“轨道车（slotcar）”式的简化运动模型执行。这就是为何 demo 能突出展示 Traffic Schedule、任务调度、协商和电梯流程，而不需要引入一整套 Nav2。
+
+2. hotel.building.yaml 是 hotel 场景的源设计文件，可以理解成 RMF Building Map 的“工程源文件”。
+
+它包含：
+```
+楼层：L1、L2、L3
+各层底图、比例尺、坐标、墙、门、地面区域
+家具/模型的放置位置
+电梯的尺寸、门、可达楼层、初始楼层
+各 fleet 的 navigation graph waypoint 和 lane
+lane 的单向、速度限制、holding point、门/电梯事件等
+```
+例如它在 YAML 中定义了：
+```
+levels:
+L1:
+L2:
+L3:
+
+lifts:
+Lift1:
+    level_doors:
+    L1: [lift1_door]
+    L2: [lift1_door]
+    L3: [lift1_door]
+```
+见 rmf_demos_maps/maps/hotel/hotel.building.yaml:17 与 rmf_demos_maps/maps/hotel/hotel.building.yaml:1027。
+
+它通常由 Traffic Editor 创建和编辑：
+```
+导入/选择楼层图
+-> 标定尺寸和坐标
+-> 绘制墙、门、楼板
+-> 放置 Gazebo 模型
+-> 标注电梯和各层出口
+-> 绘制 waypoint、lane 和 fleet graph
+-> 保存为 *.building.yaml
+```
+它不是运行时由 Gazebo 自动生成的，也不是由 Nav2 地图生成的。
+
+编译 rmf_demos_maps 时，CMake 以每个 .building.yaml 为输入自动生成两个关键产物：
+```
+hotel.building.yaml
+├─ building_map_generator gazebo
+│    -> hotel.world + models/
+└─ building_map_generator nav
+        -> nav_graphs/0.yaml、1.yaml、2.yaml ...
+```
+具体构建规则在 rmf_demos_maps/CMakeLists.txt:22。
+
+其中：
+- hotel.world 用于启动 Gazebo；
+- nav_graphs/*.yaml 供不同 fleet adapter 做 RMF 路线规划；
+- 原始 hotel.building.yaml 也会被 rmf_demos 用于 RViz/Building Map 可视化和任务地点信息。
+
+
+3. hotel_L1.png 是 Hotel 一层的平面设计底图，不是 building_map_generator 从 YAML 生成出来的。
+
+它先作为 Traffic Editor 的 drawing 输入被导入：
+```
+levels:
+L1:
+    drawing:
+    filename: hotel_L1.png
+```
+见 rmf_demos_maps/maps/hotel/hotel.building.yaml:24。
+
+然后人在这张图之上标定真实尺度、绘制墙体、门、楼板、家具、导航点和 lane，最终保存为 hotel.building.yaml。
+
+关系应理解为：
+```
+hotel_L1.png
+= 人工准备的楼层平面底图
+
+hotel.building.yaml
+= 在底图上补充的可机读建筑与交通语义
+
+building_map_generator
+= 从 YAML 生成 Gazebo world 和 RMF nav graph
+```
+它不是：
+```
+hotel.building.yaml -> hotel_L1.png
+```
+也不是：
+```
+Gazebo hotel.world -> hotel_L1.png
+```
+在真实项目中，hotel_L1.png 往往来自 CAD/BIM 平面图导出、建筑设计图、物业提供的楼层图，或人工绘制；然后由集成人员在 Traffic Editor 中建立 RMF 所需的语义地图。
+
+
+## 用通俗易懂的话语阐述 rmf 的技术路线和内部层次关系
+
+### RMF 简介
+RMF（Robotics Middleware Framework）是一个面向多品牌、多类型机器人的统一调度平台。
+
+它不替代机器人底层导航，而是负责全局协调：
+```mermaid
+flowchart LR
+    A[业务任务] --> B[RMF统一调度]
+    B --> C[任务分配]
+    B --> D[路线与时间规划]
+    B --> E[多机冲突协调]
+    C --> F[Fleet Adapter]
+    D --> F
+    E --> F
+    F --> G[机器人/电梯/自动门]
+    G --> H[状态反馈]
+    H --> B
+```
+### 核心工作流程
+```
+提交任务
+-> 选择合适机器人
+-> 规划路线和预计时间
+-> 检查多机器人是否冲突
+-> 等待、改道或重新协商
+-> 下发执行
+-> 根据实时状态动态调整
+```
+### 内部层次
+
+- 任务调度层：决定“哪个机器人做什么任务”。
+- 交通协调层：维护全局交通计划，处理机器人之间的路径冲突。
+- Fleet Adapter 适配层：把 RMF 指令转换成不同厂商的机器人指令。
+- 设备执行层：由机器人自身导航系统、底盘、电梯和自动门完成实际动作。
+
+### RMF 的主要优势
+
+1. 统一管理多品牌机器人
+    不要求所有机器人使用同一品牌或同一套控制系统。
+
+2. 支持多机协同
+    机器人共享全局交通计划，能够自动处理抢道、会车、窄通道和电梯竞争。
+
+3. 任务与交通分离
+    既能安排任务，又能协调执行任务时的路线和时间冲突。
+
+4. 适应动态变化
+    机器人延迟、故障、电量不足或新增任务时，可以重新分配和规划。
+
+5. 支持多楼层和共享设施
+    可统一管理楼层地图、电梯、自动门、充电站等资源。
+
+6. 保护既有机器人系统投资
+    RMF 通过 Adapter 对接现有机器人和 Nav2，不需要重写底盘控制系统。
+
+### 需要明确的边界
+
+RMF 主要负责：
+```
+任务安排
+全局路径和时间协调
+多机器人冲突处理
+共享设备管理
+```
+机器人自身系统负责：
+```
+定位
+局部避障
+底盘控制
+传感器处理
+紧急停止
+```
+因此，RMF 的定位可以概括为：
+```
+RMF 是机器人的“交通管理和任务调度中心”，而不是机器人的底盘控制器。
+```
+最终价值是将多个独立机器人系统，整合成一个可统一调度、可扩展、可持续运行的整体。
+
+
+## 另一种方式阐述
+RMF 的目标是让这些设备能够在同一栋建筑内协同工作。
+
+### 整体技术路线
+```mermaid
+flowchart TD
+    A[业务任务<br/>配送、清洁、巡检、充电] --> B[任务调度层]
+    B --> C{分配给哪个机器人}
+    C --> D1[Robot 1 Fleet Adapter]
+    C --> D2[Robot 2 Fleet Adapter]
+    C --> D3[Robot 3 Fleet Adapter]
+
+    D1 --> E1[单机器人路径规划]
+    D2 --> E2[单机器人路径规划]
+    D3 --> E3[单机器人路径规划]
+
+    E1 --> F[Traffic Schedule]
+    E2 --> F
+    E3 --> F
+
+    F --> G{是否存在时空冲突}
+    G -->|否| H[提交计划并执行]
+    G -->|是| I[Negotiation 协商]
+    I --> D1
+    I --> D2
+    I --> D3
+
+    H --> J[机器人导航系统或仿真执行器]
+    J --> K[返回位置、状态、电量、任务进度]
+    K --> D1
+    K --> D2
+    K --> D3
+```
+简单地说：
+```
+收到任务
+-> 选择机器人
+-> 为机器人规划路线
+-> 检查是否与其他机器人冲突
+-> 有冲突就等待、改道或重新规划
+-> 发送给机器人执行
+-> 持续反馈状态并动态调整
+```
+# 内部层次关系
+```mermaid
+flowchart TB
+    A[业务应用层] --> A1[任务请求]
+    A --> A2[状态监控]
+    A --> A3[人工干预]
+
+    B[RMF 核心调度层] --> B1[Task Dispatcher]
+    B --> B2[Task Planner]
+    B --> B3[Traffic Schedule]
+    B --> B4[Negotiation]
+    B --> B5[Blockade]
+
+    C[Fleet Adapter 适配层] --> C1[Robot 1 Adapter]
+    C --> C2[Robot 2 Adapter]
+    C --> C3[Robot 3 Adapter]
+
+    D[设备执行层] --> D1[厂商机器人控制系统]
+    D --> D2[Nav2 或其他导航系统]
+    D --> D3[电梯和自动门]
+    D --> D4[Gazebo 仿真器]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> C
+```
+### 1. 业务应用层
+
+这一层提出“要做什么”。
+
+例如：
+```
+把药品从药房送到病房
+清扫一楼走廊
+每隔 30 分钟巡逻一次
+把机器人送去充电
+```
+业务系统不需要直接知道机器人如何转弯、如何避障，只需要提交任务请求。
+
+### 2. 任务调度层
+
+这一层决定：
+```
+哪个机器人执行任务
+任务执行顺序是什么
+任务优先级如何处理
+是否需要充电
+任务是否超时
+```
+例如有两个配送任务：
+```
+Robot A 距离药房 10 米
+Robot B 距离药房 80 米
+```
+调度器可能把任务分给 Robot A。
+
+RMF 的 TaskPlanner 可以根据以下因素计算任务分配代价：
+- 预计完成时间
+- 机器人当前任务数量
+- 电量
+- 任务优先级
+- 机器人能力和限制
+
+注意：这一层主要解决“谁做什么”，不等于交通避碰。
+
+### 3. Fleet Adapter 适配层
+
+Fleet Adapter 是 RMF 和具体机器人车队之间的翻译器。
+
+RMF 使用统一的概念：
+```
+移动到某个位置
+执行某个动作
+开始充电
+打开电梯门
+报告当前位置
+```
+不同厂商的机器人接口可能完全不同：
+```
+厂商 A：REST API
+厂商 B：ROS 2 Action
+厂商 C：专用 TCP 协议
+厂商 D：模拟器接口
+```
+Fleet Adapter 将两者转换：
+```
+RMF 指令
+-> 厂商机器人命令
+
+机器人状态
+-> RMF 标准状态
+```
+因此 RMF 不需要为每个品牌重新修改核心调度逻辑。
+
+## 4. 路径规划层
+
+Fleet Adapter 使用 RMF 的导航图和 rmf_traffic::agv::Planner，为单台机器人规划路线。
+
+导航图由以下内容组成：
+```
+Waypoint：机器人可以经过或停留的位置
+Lane：Waypoint 之间的可行驶连接
+地图名称：L1、L2、L3 等
+速度限制
+单向通行规则
+Holding Point
+门、电梯等事件
+```
+规划结果不是简单的“从 A 到 B 的直线”，而是：
+```
+经过哪些点
+每个点什么时候到达
+每段路线预计占用多长时间
+需要经过哪个电梯或门
+```
+例如：
+```
+10:00:00  离开充电站
+10:00:12  到达走廊入口
+10:00:25  经过走廊
+10:00:40  到达病房
+```
+这就是一条带时间的 itinerary。
+
+## 5. Traffic Schedule
+
+Traffic Schedule 可以理解为全楼宇的“交通计划表”。
+
+它记录：
+```
+哪台机器人
+在什么地图
+什么时间
+预计占用哪些空间
+```
+例如：
+```
+Robot A：
+L1 走廊
+10:00:10 - 10:00:25
+
+Robot B：
+L1 走廊
+10:00:18 - 10:00:35
+```
+两者空间和时间都重叠，就产生冲突。
+
+DetectConflict::between() 负责判断：
+
+两条带时间的轨迹是否在同一时刻过近或相交
+
+它只负责检测，不负责：
+
+- 让机器人停车
+- 决定谁优先
+- 重新生成路线
+- 发送底盘控制命令
+
+## 6. Negotiation
+
+当 Traffic Schedule 发现冲突后，进入协商。
+
+例如：
+```
+Robot A：按原路线通过
+Robot B：在 holding point 等待 10 秒
+```
+系统会把双方的完整候选 itinerary 放在一起重新检查。
+
+如果仍然冲突：
+```
+Robot A：等待 10 秒
+Robot B：等待 10 秒
+```
+那么这个方案会被拒绝，因为两台机器人可能只是同时推迟了 10 秒，冲突仍然存在。
+
+协商最终要找到：
+
+所有机器人都有可执行计划
+所有计划之间没有未解决冲突
+满足门、电梯、道路等资源约束
+
+## 7. Blockade
+
+Blockade 更像是“实时的局部通行控制”。
+
+可以把它理解为：
+```
+Traffic Schedule：
+提前规划未来一段时间的交通占用
+
+Blockade：
+机器人快要进入某个关键区域时，实时申请通行
+```
+例如一条窄走廊只能容纳一台机器人：
+```
+Robot A 申请进入走廊
+-> 获得通行范围
+-> Robot A 通过
+
+Robot B 同时申请
+-> 暂时不能进入
+-> 等待 A 释放走廊
+```
+两者区别：
+```
+功能        Traffic Schedule    Blockade
+━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━
+主要对象    未来的完整轨迹      当前即将进入的区域
+──────────  ──────────────────  ────────────────────
+时间尺度    较长                较短、更实时
+──────────  ──────────────────  ────────────────────
+主要作用    计划和协商          通行授权和占用控制
+──────────  ──────────────────  ────────────────────
+典型问题    未来是否会冲突      现在能不能进入
+```

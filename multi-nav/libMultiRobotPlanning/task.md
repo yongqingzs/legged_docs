@@ -99,3 +99,61 @@ GCS 的多点任务分配 + 每机 TSP
 CBS / CBS-TA / SIPP 等协调器消解跨机器人冲突
 ```
 若要让本库更接近该 Python 项目，CBS-TA 是合适的协调框架，但需要扩展任务定义和低层环境，使一个“任务”能够表示一串 checkpoint，或在任务分配/TSP 后额外接入 CBS 冲突协调层。
+
+## task1
+### @/home/jazzy/cpp/libMultiRobotPlanning 这个项目包含仿真的内容吗？请复现，如果需要 python 环境，使用 uv 在项目下建立
+
+• 包含，但它是离散 MAPF 的路径动画，不是带动力学、传感器或物理引擎的机器人仿真。
+
+我已复现 CBS 四机器人交换场景：
+- 输入：test/mapf_swap4.yaml
+- CBS 调度输出：build/simulation_cbs_swap4.yaml
+- 动画视频：build/simulation_cbs_swap4.mp4
+- 第 4 秒截图：build/simulation_cbs_swap4_t4.png
+
+结果：总代价 28、makespan 8、CBS 高层展开 5 个节点。四台机器人从上下左右穿过中央障碍进行目标交换，生成的调度无顶点冲突和反向边冲突。
+
+可视化实现位于 example/visualize.py:13，它按时间插值移动圆形机器人，并在检测到机器人距离小于 0.7 时标红报告碰撞。
+
+本项目下已通过 uv 建立 .venv 并安装 matplotlib、pyyaml；CMake 构建产物位于 build/。复现命令如下：
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 4
+
+cd build
+./cbs -i ../test/mapf_swap4.yaml -o simulation_cbs_swap4.yaml
+../.venv/bin/python ../example/visualize.py \
+../test/mapf_swap4.yaml simulation_cbs_swap4.yaml \
+--video simulation_cbs_swap4.mp4
+```
+
+问题:
+1. 该项目包含哪些算法，各算法针对哪些场景？请举形象的例子说明。并且复现各算法的仿真。
+
+| 算法 | 适用场景 | 形象例子 | 复现结果 |
+|---|---|---|---|
+| **A\*** | 单机器人、静态地图、要求最短路 | 叉车绕开货架去指定工位 | `build/reproductions/a_star.yaml`，代价 3 |
+| **A\* epsilon** | 单机器人，需要更快的近似解 | 配送车允许多走一点以更快出路线 | `build/reproductions/a_star_epsilon_w1_5.yaml`，`w=1.5`，代价 3 |
+| **SIPP** | 单机器人、存在动态占用 | 机器人在路口等待另一台车先通过 | `build/reproductions/sipp_dynamic_obstacle.yaml`，在 `t=3..8` 等待 |
+| **CBS** | 多机器人，要求最优且无碰撞 | 四台车从十字通道四侧交换位置 | `build/reproductions/cbs_swap4.mp4`，总代价 28、makespan 8 |
+| **ECBS** | 多机器人，可接受有界次优来加速 | 仓库高峰期优先快速给出可行无碰撞方案 | `build/reproductions/ecbs_swap4_w1_3.mp4`，`w=1.3`，总代价 28 |
+| **CBS-TA** | 多机器人，一对一目标分配与避碰联合求解 | 两台车要去两个工位，自动决定谁去哪个 | `build/reproductions/cbs_ta_assignment.mp4`，总代价 6 |
+| **ECBS-TA** | CBS-TA 的有界次优加速版 | 大规模工位派发，需要快速协同方案 | `build/reproductions/ecbs_ta_assignment_w1_3.mp4`，总代价 6 |
+| **Prioritized Planning + SIPP** | 多机器人，按优先级快速规划 | 先给主通道 AGV 规划，后续车辆绕开其时间窗口 | `build/reproductions/prioritized_sipp_swap4.mp4`，总代价 28 |
+| **CBS on Roadmap** | 多机器人在任意图、运动原语或道路网络中规划 | 机器人在预定义航线图中避让 | `build/reproductions/cbs_roadmap_annotated.mp4`，总代价 8 |
+| **Assignment** | 最小总成本一对一分配 | 四名员工分配给四个订单 | `build/reproductions/assignment_4x4.yaml`，总代价 275 |
+| **Next-Best Assignment** | 按成本依次枚举可行分配 | 最优人选不可用时，立即选择下一优方案 | `build/reproductions/next_best_assignment_4x4.yaml`，24 种方案，最优 275 |
+
+| 算法 | 具体机器人例子 |
+|---|---|
+| **A\*** | 只有机器人 `a`。它从仓库入口 `(0,0)` 去充电桩 `(2,1)`，中间 `(1,1)` 是货架。`a` 选择 `(0,0) → (1,0) → (2,0) → (2,1)`，总代价 `3`。它不关心其他机器人，也不处理动态障碍。 |
+| **A\* epsilon** | 仍只有 `a`，但调度系统只给 `20 ms` 出路线。最短路线可能代价 `10`；设置 `w=1.5` 后，算法允许代价最多约 `15` 的路线，以更少搜索节点换取速度。就像“允许 `a` 多绕半圈，但必须立刻发车”。 |
+| **SIPP** | `a` 从 `(0,1)` 去 `(2,3)`；但机器人 `b` 的既有调度表规定：它在 `(2,3)` 停留至 `t=8`。`a` 走到 `(1,3)` 后不能进入目标，因此执行：`t=3` 到达 `(1,3)`，等待到 `t=8`，`t=9` 再进入 `(2,3)`。SIPP 的关键是把 `(2,3)` 的可进入时间建模为**安全时间区间**。 |
+| **CBS** | 四台机器人要通过被中央障碍物分开的区域：`a: (0,2) → (4,2)`，`b: (4,2) → (0,2)`，`c: (2,4) → (2,0)`，`d: (2,0) → (2,4)`。独立最短路可能让 `a` 与 `c` 同时占 `(1,2)`。CBS 发现冲突后分支：一种方案禁止 `a` 在 `t=3` 占该格，另一种禁止 `c` 占该格；重规划直至四者在不同时间经由上下绕行通道通过。 |
+| **ECBS** | 场景同 CBS。CBS 必须证明“总路程绝对最小”；ECBS 设置 `w=1.3` 后，只要求解的总代价不超过当前理论下界的 `1.3` 倍。比如 `a` 多等待一拍或 `d` 走稍长绕路也可接受，以明显减少高层冲突树搜索。当前复现实例恰好仍找到总代价 `28` 的解。 |
+| **CBS-TA** | `a` 位于 `(0,0)`，`b` 位于 `(1,0)`；待执行目标为 `P=(4,0)`、`Q=(3,0)`。候选分配包括：`a→P, b→Q` 与 `a→Q, b→P`。CBS-TA 不只比较距离，还会检查两种分配下的路径冲突。若某种分配使 `a` 与 `b` 在窄走廊相遇，它会像 CBS 一样加入时空约束，或转向另一组任务分配。 |
+| **ECBS-TA** | 场景同 CBS-TA，但不必穷尽证明每一种“分配 + 避碰路径”组合都严格最优。比如 `a→P,b→Q` 的总代价为 `6`，另一条无冲突方案总代价 `7`；当 `w=1.3` 时，总代价 `7` 也可能被接受，从而更快结束搜索。 |
+| **优先级规划 + SIPP** | 设优先级 `a > b > c > d`。先为 `a` 规划并固定其完整时空轨迹；然后 `b` 将 `a` 的轨迹视为动态障碍，用 SIPP 绕开或等待；再依次规划 `c、d`。例如 `a` 在 `t=3` 经过 `(3,2)`，`b` 就不能同一时刻进入该格。它快，但优先级不佳时，`a` 的路线可能堵死 `d`。 |
+| **CBS on Roadmap** | 不是方格，而是路网节点 `A-B-C-D` 和一条支路。机器人 `a` 从节点 `A` 去 `C`，`b` 从 `D` 去 `B`。若两者会在同一时段反向通过边 `B-C`，CBS 会禁止其中一台在该时段使用该边，令它在 `B` 等待或走支路。适合室内航线、AGV 道路网络、运动原语图。 |
+| **Assignment** | 有四台机器人 `a,b,c,d` 和四个一次性任务 `T0..T3`。成本矩阵表示“机器人去执行任务的距离/耗时”。求解得到：`a→T3, b→T2, c→T1, d→T0`，总代价 `275`。它只负责配对，不生成路线，也不检查机器人会不会相撞。 |
+| **Next-Best Assignment** | 场景同 Assignment。第一方案是 `a→T3, b→T2, c→T1, d→T0`。若 `d` 电量不足而不能接 `T0`，系统不必重新从头求解，可以给出下一成本最低的完整分配，再给第三方案，依此枚举。复现的 `4×4` 例子共有 `24` 种一对一匹配。 |

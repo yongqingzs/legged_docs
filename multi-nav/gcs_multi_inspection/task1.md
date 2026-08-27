@@ -876,4 +876,56 @@ B: 119.97556028679548, 30.325576899573885
 ## task9
 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/power1_wgs84.json 我运行这个 config，发现运行结果和直观最短路径分配结果(a、b 两狗一狗一边，而不是交叉)不一致，请分析原因和你的想法
 
-我指的是直观最短路径分配是针对 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/power1_wgs84.json 这个场景: "a一边，b一边"，总路径长度会最短，为什么没这么分配？而不是要他们一定分区
+### 我指的是直观最短路径分配是针对 @/home/jazzy/py/GCS_Multi_Inspection_MIBNB/configs/power1_wgs84.json 这个场景: "a一边，b一边"，总路径长度会最短，为什么没这么分配？而不是要他们一定分区
+
+• 你说得对。若目标是“两台机器人实际巡检路径长度之和最短”，当前结果并不合理，且我已用当前场景的完整图距离验证。
+
+当前输出的两条实际路线总长：
+```
+Depot0: 371.067 m
+Depot1: 268.651 m
+合计:   639.717 m
+```
+我枚举了全部 2^10 种 checkpoint 分配，并对每个分配分别求两台机器人“不返回 depot”的最短开路径 TSP。按算法当前使用的同一张 GCS 点对距离图，全局最优的两车总路线为：
+```
+Depot0:
+Depot0 -> Checkpoint3 -> Checkpoint2 -> Checkpoint5
+        -> Checkpoint9 -> Checkpoint8 -> Checkpoint7
+        -> Checkpoint6 -> Checkpoint4
+383.801 m
+
+Depot1:
+Depot1 -> Checkpoint0 -> Checkpoint1
+52.336 m
+
+合计: 436.138 m
+```
+相比当前结果短约 203.579 m，约 31.8%。所以问题不是你的直觉有误，当前“先分配、后 TSP”的高层方法确实没有优化你关心的总路线长度。
+
+根因在于当前分配阶段只计算：
+```
+Depot -> Checkpoint
+```
+然后优化：
+```
+max(每个 depot 的 Depot->Checkpoint 距离之和) + 0.1 × 所有 Depot->Checkpoint 距离之和
+```
+见 /home/jazzy/py/GCS_Multi_Inspection_MIBNB/spp/high_level_inspection_MIBNB.py:10。它完全没有使用：
+```
+Checkpoint_i -> Checkpoint_j
+```
+这些点对距离只在分配完成后才用于 TSP。因此它会把相邻、应连续访问的点拆给不同机器人，以获得看似均衡的“星形距离负载”；随后每台机器人只能在自己被分到的离散点集上走 TSP，无法修复已经产生的交叉和绕行。
+
+你说的“a 一边、b 一边”并不是额外的人为分区要求，而是在这个地图结构上，最小化两条实际路径总长时自然应出现的结果。要得到这种结果，分配目标必须改为：
+```
+minimize TSP_cost(Depot0, assigned0)
+        + TSP_cost(Depot1, assigned1)
+```
+而不是当前的 Depot -> Checkpoint 星形距离代理目标。
+
+还需注意：两个 depot 当前只相距约 1.69 m，所以“哪台负责哪一边”本身可互换；但不影响结论，正确优化应让两组任务各自形成连续路线，而不是追求两台机器人的星形距离负载相等。
+
+此外，当前分配结果甚至不是其自身星形距离目标的最佳分配：对 10 个点穷举可得更低的分配目标值。这是 MIBNB 分配求解只接受找到的可行解、未确认离散全局最优的次要问题；但即使将其修正，仍不能解决“总巡检路径非最短”的主问题。
+
+问题:
+1. 如何解决？你有什么方案或建议？
