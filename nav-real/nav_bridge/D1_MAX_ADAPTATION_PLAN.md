@@ -1,5 +1,7 @@
 # nav_bridge 适配智元 D1 Max 方案
 
+> 当前实现采用低风险双后端方案：X30 原有协议和状态机保留，仅移动到 `include/nav_bridge/x30/`、`src/x30/`；D1 Max 独有实现位于 `include/nav_bridge/d1_max/`、`src/d1_max/`。对外只保留 `launch/nav_bridge.launch.py`，由 `config/nav_bridge.yaml` 的 `robot_type: x30|d1_max` 选择节点。X30 暂不强制重写为 `RobotBackend`，避免破坏既有实机逻辑。
+
 本文档基于以下材料分析：
 
 - 现有桥接实现：`/home/jazzy/drive_ws/src/nav_bridge`
@@ -90,7 +92,7 @@ SDK 的 `IDataCallback` 包含：
 | `/battery_text` | 复用 X30 的 RViz 叠加显示 |
 | `/charge_manager_state` | 只有确认 D1 SDK/固件提供回充 API 后实现，否则明确返回“不支持” |
 
-推荐继续保留 `~/stand`、`~/lie`、`~/soft_estop`、`~/release_control` 和 `/cmd_vel`；`~/set_gait` 应重新定义为 D1 模式/动作服务，或在 D1 后端返回“不支持”，不能把 `MOUNTAIN/L_STAIR` 等 X30 gait 名称透传给 D1。
+推荐保留统一导航语义接口；D1 与 X30 一样使用 `~/set_gait`，当前仅将 `MOUNTAIN(33)` 映射为 RobotSDK `Gait()` 通用模式，其他步态返回不支持，不新增 D1 专用上层接口。
 
 ## 4. D1 状态映射方案
 
@@ -177,7 +179,7 @@ D1 SDK 的动作 API 已经封装了底层命令确认，第一版不应照搬 X
 - `src/d1_max_nav_bridge_node.cpp`：已实现 ROS 装配层，复用现有话题/服务名称；
 - `config/d1_max_params.yaml`、`launch/d1_max_nav_bridge.launch.py`：D1 独立参数和启动入口。
 
-当前可执行入口为 `d1_max_nav_bridge_node`，构建时显式开启 `-DNAV_BRIDGE_BUILD_D1_MAX=ON`。该节点已提供 `/cmd_vel`、`~/stand`、`~/lie`、`~/soft_estop`、`~/release_control`、`~/set_mode`、`~/set_speed`、`/robot_basic_state`、`/battery/level`、`/imu/data`、`/leg_odom`、`/joint_states` 和 `/robot_fault`。
+当前可执行入口为 `d1_max_nav_bridge_node`，构建时显式开启 `-DNAV_BRIDGE_BUILD_D1_MAX=ON`。该节点已提供 `/cmd_vel`、`~/stand`、`~/lie`、`~/soft_estop`、`~/release_control`、`~/set_gait`、`~/set_speed`、`/robot_basic_state`、`/battery/level`、`/imu/data`、`/leg_odom`、`/joint_states` 和 `/robot_fault`。
 
 已使用以下命令完成构建验证（Ubuntu 22.04/ROS 2 Jazzy）：
 
@@ -194,7 +196,7 @@ colcon build --packages-select nav_bridge \
 ### 阶段 C：ROS 接口兼容和 D1 专用扩展
 
 - 先保证 `/cmd_vel`、`/imu/data`、`/leg_odom`、基本状态、电池和四个基础服务可用；
-- `~/set_speed` 已映射 SDK `SetSpeed(1/2/3)`；`~/set_mode` 保留兼容入口，但 RobotSDK-0.2.1 已移除 `SetMode`，当前明确返回不支持，应改用专用姿态命令接口；
+- `~/set_speed` 已映射 SDK `SetSpeed(1/2/3)`；D1 不暴露 `~/set_mode`，`~/set_gait` 的 `MOUNTAIN(33)` 映射 SDK `Gait()`；
 - 对 `~/set_gait`、`~/set_body_height`、`~/charge_command` 做能力声明，不支持的操作返回结构化错误，不伪造成功；
 - 故障可增加 `/robot_fault`，类型可先采用 `diagnostic_msgs` 或项目统一消息。
 
@@ -277,3 +279,43 @@ D1 的适配重点是“把 SDK 高层 API 转成公共 ROS 接口”，而不�
 - 为动作服务增加最终 `MotionStatus` 等待和超时；
 - 为 SDK 命令增加串行执行队列，避免动作服务与 `/cmd_vel` 并发访问；
 - 是否需要保留 X30 专用话题，还是允许 D1 节点对不适用接口返回明确错误。
+
+## 12. 导航主机部署与真机验证记录（2026-08-31）
+
+### 部署环境
+
+- 导航主机：`robot@192.168.168.100`（`aarch64`，ROS 2 Humble）。
+- 运动主机：`robot@192.168.168.168`，同时具有 `192.168.234.1` 无线/p2p 地址。
+- 工作空间：`~/Workspace/driver_ws/src/nav_bridge`。
+- 构建选项：`NAV_BRIDGE_BUILD_D1_MAX=ON`、`NAV_BRIDGE_BUILD_X30=OFF`、`BUILD_TESTING=OFF`。
+- SDK 库来自仓库内 `third_party/robot_sdk/lib/aarch64`，未链接开发机或 SDK 源目录的绝对路径。
+
+### 网络结论
+
+导航主机访问 `192.168.234.1` 时，系统默认路由会错误地经 `192.168.144.144` 发送，导致 RobotSDK UDP 握手失败。运动主机已开启 IPv4 forwarding；在导航主机添加临时路由后，SDK 仍不稳定地使用错误源路径。因此本部署将 D1 SDK 目标配置为运动主机在共享网段的地址：
+
+```bash
+ip route replace 192.168.234.0/24 via 192.168.168.168 dev enP8p1s0
+```
+
+`config/d1_max_params.yaml` 的 `d1_host_ip` 已设为 `192.168.168.168`。如果现场网络拓扑不同，应以 `ip route get <运动主机地址>` 验证后再改参数。
+
+### 验证结果
+
+通过唯一入口启动：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/setup.bash
+ros2 launch nav_bridge nav_bridge.launch.py
+```
+
+实机日志确认：`D1 Max backend connected to 192.168.168.168:8082`。以下公共 ROS 接口已在真机收到数据：
+
+- `/imu/data`：约 12 Hz；
+- `/leg_odom`：约 15 Hz；
+- `/joint_states`：约 15 Hz，包含 16 个关节；
+- `/battery/level`：读取到 46%；
+- `/robot_basic_state`、`/robot_fault`：已建立发布器。
+
+本次未发送非零 `/cmd_vel`，也未调用站立、趴下等会改变机器狗姿态的动作服务；因此控制运动安全性、方向符号和控制权抢占仍需在具备安全看护条件时单独回归。独立 RobotSDK 例程使用 `192.168.234.1:8082` 的失败与 nav_bridge 一致，而使用 `192.168.168.168:8082` 成功，进一步证明此前故障是导航主机 UDP 目标/路由选择问题，不是 ROS 消息转换问题。
