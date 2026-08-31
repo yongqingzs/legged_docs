@@ -722,3 +722,35 @@ Robot B 同时申请
 ──────────  ──────────────────  ────────────────────
 典型问题    未来是否会冲突      现在能不能进入
 ```
+
+# @/home/jazzy/rmf_ws/src/rmf-web 我安装过程(源码安装、而不是镜像安装)出现问题，请解决问题，完成安装
+后续启动：
+```
+source /opt/ros/jazzy/setup.bash
+source /home/jazzy/rmf_ws/install/setup.bash
+
+cd /home/jazzy/rmf_ws/src/rmf-web/packages/api-server
+pnpm start
+```
+Dashboard 另开终端启动：
+```
+cd /home/jazzy/rmf_ws/src/rmf-web/packages/rmf-dashboard-framework
+pnpm start:example examples/demo
+```
+浏览器访问 http://localhost:5173。
+
+
+### 修改后启动方式：
+```
+source /opt/ros/jazzy/setup.bash
+source /home/jazzy/rmf_ws/install/setup.bash
+
+cd /home/jazzy/rmf_ws/src/rmf-web/packages/api-server
+pnpm start
+```
+另开终端：
+```
+cd /home/jazzy/rmf_ws/src/rmf-web/packages/rmf-dashboard-framework
+pnpm start:example examples/demo -- --host 127.0.0.2 --port 5175
+```
+浏览器访问 http://127.0.0.2:5175。

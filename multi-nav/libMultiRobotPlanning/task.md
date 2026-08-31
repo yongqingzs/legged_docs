@@ -157,3 +157,727 @@ cd build
 | **CBS on Roadmap** | 不是方格，而是路网节点 `A-B-C-D` 和一条支路。机器人 `a` 从节点 `A` 去 `C`，`b` 从 `D` 去 `B`。若两者会在同一时段反向通过边 `B-C`，CBS 会禁止其中一台在该时段使用该边，令它在 `B` 等待或走支路。适合室内航线、AGV 道路网络、运动原语图。 |
 | **Assignment** | 有四台机器人 `a,b,c,d` 和四个一次性任务 `T0..T3`。成本矩阵表示“机器人去执行任务的距离/耗时”。求解得到：`a→T3, b→T2, c→T1, d→T0`，总代价 `275`。它只负责配对，不生成路线，也不检查机器人会不会相撞。 |
 | **Next-Best Assignment** | 场景同 Assignment。第一方案是 `a→T3, b→T2, c→T1, d→T0`。若 `d` 电量不足而不能接 `T0`，系统不必重新从头求解，可以给出下一成本最低的完整分配，再给第三方案，依此枚举。复现的 `4×4` 例子共有 `24` 种一对一匹配。 |
+
+
+# 实际问题要求
+存在一种问题:
+1. 任务具备属性，例如: 灭火、云台拍照等
+2. 机器人具备属性，例如: 灭火能力、云台拍照能力等
+是否有算法能够支持按照机器人能力、任务属性进行分配，同时考虑最短路径、负载均衡等生成路径。
+可以多个算法层次化解决。
+
+请设计总体方案，并说明你会用到 libMultiRobotPlanning 中哪些算法，以什么结构层次进行组织。你需要另外添加哪些算法/实现。
+
+你设计的这个算法框架支持多机、多任务(一个机器人分到多个任务，也可能会分到单个任务；也就是机器人数量和任务数量并不是固定的，例如: 4个机器人需要分配 20 个点位(每个点位上有多个任务))的分配吗？
+
+## 多机器人多任务分配
+
+支持。这正是第一层采用**“带能力约束的多任务 VRP/MDVRP”**，而不是本库 `Assignment` 或 `CBS-TA` 的原因。
+
+### 1. 支持的规模与任务类型
+
+它支持：
+
+- **机器人数量 R**：任意，例如 4 台
+- **点位数量 P**：任意，例如 20 个
+- **每个点位的任务数**：任意，例如灭火、拍照、测温、投放等
+- **每台机器人任务数**：0、1 或多个
+
+例如：
+
+**机器人：**
+
+- `a`：灭火 + 拍照
+- `b`：拍照
+- `c`：灭火
+- `d`：测温 + 拍照
+
+**点位 P7：**
+
+- `T7-1`：灭火
+- `T7-2`：云台拍照
+- `T7-3`：测温
+
+由于 P7 上有三个任务，第一层可以得到以下任一种合理分配：
+
+#### 方案 1：按能力拆分
+
+```text
+a -> P7：灭火
+b -> P7：拍照
+d -> P7：测温
+```
+
+#### 方案 2：优先减少移动
+
+```text
+a -> P7：灭火 + 拍照
+d -> P7：测温
+```
+
+#### 方案 3：优先负载均衡
+
+```text
+c -> P7：灭火
+b -> P7：拍照
+d -> P7：测温
+```
+
+若任务允许由同一机器人连续完成，**方案 2** 可以减少到达 P7 的重复移动；若 `a` 已很忙，优化器可能选择**方案 3** 来降低最大负载。
+
+---
+
+## 2. Point 与 AtomicTask
+
+对于“4 台机器人、20 个点位、每点多个任务”，应采用两个层级的对象：
+
+```text
+Point / Location
+    P1, P2, ..., P20
+
+AtomicTask
+    T1-灭火、T1-拍照、T2-测温、...
+```
+
+优化器真正分配的是 **AtomicTask**，但路径路由按 **Point** 聚合。
+
+例如最终输出可以是：
+
+```text
+a:
+    DepotA -> P3[灭火, 拍照] -> P11[灭火] -> P18[拍照] -> DepotA
+
+b:
+    DepotB -> P2[拍照] -> P7[拍照] -> P15[拍照] -> DepotB
+
+c:
+    DepotC -> P1[灭火] -> P7[灭火] -> P13[灭火] -> DepotC
+
+d:
+    DepotD -> P4[测温, 拍照] -> P10[测温] -> P20[拍照] -> DepotD
+```
+
+这里：
+
+* `a、b、c、d` 都得到多个任务；
+* 某台机器人也可以因能力不匹配或电量不足得到零个任务；
+* `P7` 被 `b` 与 `c` 分别访问，因为它上面的拍照和灭火任务需不同能力；
+* `a` 在 `P3` 一次停靠完成两个兼容任务，减少重复到访。
+
+---
+
+## 3. 分配约束
+
+分配约束从“一对一”变为：
+
+$$
+\sum_r x_{r,t} = 1
+$$
+
+即每个原子任务 `t` 必须分给**恰好一台兼容机器人**；但机器人 `r` 可满足：
+
+$$
+\sum_t x_{r,t} \geq 0
+$$
+
+因此没有“一台机器人只能接一个任务”的限制。
+
+---
+
+## 4. 不同业务语义的建模方式
+
+| 任务类型            | 建模方式                                       |
+| --------------- | ------------------------------------------ |
+| 一个任务只能由一台机器人完成  | $\sum_r x[r,t] = 1$                        |
+| 一个任务需多机器人协作     | $\sum_r x[r,t] = k$，再加同时到达或时间间隔约束          |
+| 同点多个任务可由同一台机器人做 | 将多个原子任务分配给同一机器人，并在路线中合并为一次停靠               |
+| 同点多个任务必须由不同机器人做 | 增加 $\sum_{t\ at\ point} x[r,t] \leq 1$ 等约束 |
+| 灭火后才能拍照         | 在该点加入服务先后约束                                |
+| 拍照与测温可同时进行      | 用服务时长的 `max`，而不是求和                         |
+| 任务未完成可转派        | 保存任务状态并进行滚动重规划                             |
+
+---
+
+## 5. 负载计算
+
+负载也不只按任务数量计算，而应按**预计完成时间**：
+
+$$
+L_r =
+travelTime_r +
+\sum_{t \in tasks(r)} serviceTime_t +
+waitTime_r +
+returnTime_r
+$$
+
+以：
+
+$$
+\min \max_r L_r
+$$
+
+作为核心目标，就能让 4 台机器人面对 20 个点位时尽量**同时结束**，而不是简单地每台平均分 5 个点。
+
+---
+
+## 6. 整体求解流程
+
+需要注意：若同时要求：
+
+* 每点多任务拆分/聚合
+* 能力匹配
+* 时间窗
+* 电量约束
+* TSP 顺序
+* 跨机器人避碰
+
+这是一个 **NP-hard** 问题。
+
+工程上推荐：
+
+```text
+原子任务分配
+      ↓
+同机器人同点任务合并
+      ↓
+每机器人 VRP/TSP 排序
+      ↓
+单机路径规划
+      ↓
+ECBS / CBS 避碰
+      ↓
+成本反馈
+      ↓
+有限次数重优化
+```
+
+这样可以自然支持**机器人数量、点位数量和每点任务数量都变化**的情况。
+
+```
+
+
+问题:
+1. 借助 @/home/jazzy/cpp/libMultiRobotPlanning、@/home/jazzy/rmf_ws/src/rmf/rmf_task/rmf_task，实现你的构想(放在 @/home/jazzy/cpp 下)，完成后测验通过
+
+
+• 已在 /home/jazzy/cpp/capability_mission_planner 完成独立工程，实现了能力感知的多机器人、多点位、多任务分配与无冲突路径规划。
+
+核心结构：
+
+- RMF 任务语义：/home/jazzy/cpp/capability_mission_planner/include/capability_mission_planner/types.hpp:69
+        - 使用 rmf_task::Task::Booking
+        - 使用 rmf_task::Header
+        - 使用 RMF 二级优先级
+        - 支持任务 ID、类别、服务时间、标签和能力要求
+
+- 能力约束与负载均衡：/home/jazzy/cpp/capability_mission_planner/src/mission_planner.cpp:196
+        - 一个机器人可获得 0/1/N 个任务
+        - 每个原子任务恰好分配一次
+        - 不兼容的机器人-任务组合直接排除
+        - 同机器人、同点位任务合并为一次停靠
+        - 优化最大负载和总负载
+        - 初始插入后通过任务迁移局部搜索继续改善
+
+- 最短路径：
+        - 使用 libMultiRobotPlanning::AStar
+        - 支持带障碍二维网格
+        - 分配成本采用真实 A* 路径长度，不是欧氏直线估算
+
+- 多机避碰：/home/jazzy/cpp/capability_mission_planner/src/cbs_coordinator.cpp:348
+        - 使用 libMultiRobotPlanning::CBS
+        - 消除同一时刻同位置的顶点冲突
+        - 消除机器人对向交换边的冲突
+        - 保持各机器人任务访问顺序
+        - 任务服务时间转换为停靠等待
+        - 零任务机器人仍参与避碰并最终返回原位置
+
+示例实现了 4 台机器人、20 个点位、每点两个任务，共 40 个原子任务：
+- /home/jazzy/cpp/capability_mission_planner/examples/mission_demo.cpp
+- /home/jazzy/cpp/capability_mission_planner/mission_plan.json
+
+实际结果：
+```
+机器人数量：4
+原子任务：40，全部唯一分配
+最大负载：42
+总负载：162
+
+a: 9 个点位，14 个任务，负载 41
+b: 8 个点位，13 个任务，负载 41
+c: 4 个点位， 4 个任务，负载 38
+d: 5 个点位， 9 个任务，负载 42
+```
+测试覆盖：
+
+- RMF Booking/Header/Priority 信息
+- A* 障碍绕行
+- 4 机、20 点、40 任务完整分配
+- 能力兼容性
+- 同点任务合并
+- 任务唯一分配
+- 不可执行任务拒绝
+- CBS 顶点与边冲突消解
+- CBS 保持任务访问顺序
+- 零任务机器人避碰
+
+验证结果：
+```
+```
+普通 Release 构建：通过
+CTest：100% tests passed
+AddressSanitizer：通过
+UndefinedBehaviorSanitizer：通过
+```
+运行方式见 /home/jazzy/cpp/capability_mission_planner/README.md。当前分配器是面向中等规模的启发式求解器，不承诺全局最优；电量、硬时间窗、多机器人协作完成同一任务尚未纳入当前版本。环境未安装 clang-format，因此未执行格式工具检查。
+
+问题:
+1. 如果用了其他项目的代码(例如: @/home/jazzy/cpp/libMultiRobotPlanning)，不要将其作为依赖项，将其源码直接加入 @/home/jazzy/cpp/capability_mission_planner
+
+2. 不要讲参考 libMultiRobotPlanning、rmf_task 的代码放在 third_party 里，放在 include、src 下的独立模块(不一定要和原来的名称相同，按照模块功能划分)，licenses 可以保留。这些更符合规范吧，你觉得呢，客观分析。
+
+# 3. @/home/jazzy/cpp/capability_mission_planner 的输入输出是什么？结合具体例子讲解？算法能接收什么地图-点线地图、栅格地图还是 gis 地图，或者具备适配可能。
+
+• 当前项目是一个 C++ 库，不是一个已经定义 JSON/RMF 消息协议的独立服务。调用者通过 C++ 结构体传入机器人、任务和地图，返回MissionPlan。
+
+1. 输入
+
+主要入口：
+```c++
+MissionPlan MissionPlanner::plan(
+const std::vector<Robot>& robots,
+const std::vector<AtomicTask>& tasks,
+bool coordinate_conflicts = true) const;
+```
+机器人：
+```c++
+struct Robot {
+std::string id;          // 例如 "a"
+Location start;          // 起点
+CapabilitySet capabilities; // 能力集合
+bool return_home;        // 是否回到起点
+};
+```
+任务：
+```c++
+struct AtomicTask {
+ConstTaskBookingPtr booking; // ID、优先级、标签、最早开始时间
+TaskHeader header;           // 类别、描述、预计服务时长
+Location location;           // 任务点
+CapabilitySet requirements;  // 所需能力
+};
+```
+通常使用：
+```c++
+auto task = make_task(
+"P7-fire",
+{7, 1},
+{"fire"},
+"fire_suppression",
+10,
+true); // 高优先级
+```
+地图当前通过：
+```c++
+GridMap map(
+12, 12,
+{{ {3, 2}, {3, 3}, {4, 3} }}); // 障碍栅格
+```
+然后：
+```c++
+GridPathPlanner path_planner(map);
+MissionPlanner planner(path_planner);
+MissionPlan result = planner.plan(robots, tasks, true);
+```
+2. 具体例子
+
+假设有四台机器人：
+```
+a: 起点 (0,0)，能力 fire、camera
+b: 起点 (11,0)，能力 camera、thermal
+c: 起点 (0,11)，能力 fire、thermal
+d: 起点 (11,11)，能力 fire、camera、thermal
+```
+任务：
+```
+P0-photo: (1,1)，需要 camera，服务 1 秒
+P0-fire:  (1,1)，需要 fire，服务 2 秒
+P1-photo: (2,1)，需要 camera，服务 1 秒
+P2-fire:  (3,1)，需要 fire，服务 2 秒
+P3-thermal: (4,1)，需要 thermal，服务 5 秒
+```
+可能的分配结果：
+```
+机器人 a:
+(1,1): P0-photo + P0-fire
+(2,1): P1-photo
+(3,1): P2-fire
+
+机器人 b:
+没有任务，或者承担其他 camera/thermal 任务
+
+机器人 c:
+没有任务，或者承担其他 fire/thermal 任务
+
+机器人 d:
+承担 P3-thermal
+```
+其中：
+
+- P0-photo 和 P0-fire 位于同一个点；
+- 如果分给同一个机器人，会合并为一个 RouteStop；
+- 该点服务时间为 1 + 2 = 3；
+- a 不会被分配 thermal 任务；
+- b 不会被分配 fire 任务；
+- d 因能力最多，可以作为多个任务类型的候选机器人。
+
+任务分配过程会综合考虑：
+```
+能力满足性
+任务优先级
+服务时长
+A* 实际路径距离
+最大机器人负载
+所有机器人总负载
+```
+当前默认目标可以理解为：
+```
+最小化：
+最大单机负载 + 0.1 × 所有机器人负载总和
+```
+其中：
+```
+单机负载 = 路径代价 + 服务时间
+```
+因此，算法不会简单地把所有任务分给距离最近的机器人，而会避免某一台机器人负载过重。
+
+3. 输出
+```c++
+MissionPlan：
+
+struct MissionPlan {
+std::vector<RobotRoute> routes;
+std::vector<std::vector<TimedState>> schedules;
+int maximum_load;
+int total_load;
+};
+```
+每台机器人的路线：
+```c++
+struct RobotRoute {
+std::size_t robot_index;
+std::vector<RouteStop> stops;
+int travel_cost;
+int service_cost;
+};
+```
+每个停靠点：
+```c++
+struct RouteStop {
+Location location;
+std::vector<std::size_t> task_indices;
+int service_duration;
+};
+```
+时间调度：
+```c++
+struct TimedState {
+Location location;
+int time;
+};
+```
+例如机器人 a 的输出可能是：
+```
+路线:
+(1,1): P0-photo, P0-fire
+(2,1): P1-photo
+(3,1): P2-fire
+
+时间表:
+t=0: (0,0)
+t=1: (1,0)
+t=2: (1,1)
+t=3: (1,1)  // 服务等待
+t=4: (1,1)  // 服务等待
+t=5: (2,1)
+t=6: (3,1)
+...
+```
+如果多个机器人可能发生冲突，CBS 会插入等待或绕行。例如：
+```
+a: (1,0) -> (2,0)
+b: (3,0) -> (2,0)
+```
+两者不能在同一时刻进入 (2,0)，CBS 会让其中一台等待：
+```
+a: t=1 (1,0), t=2 (2,0)
+b: t=1 (3,0), t=2 (3,0), t=3 (2,0)
+```
+它还会避免交换边冲突：
+```
+a: (1,0) -> (2,0)
+b: (2,0) -> (1,0)
+```
+如果 coordinate_conflicts=false，只返回分配和无时间冲突前的路线，schedules 不会生成。
+
+当前示例程序还会把结果输出成 JSON，格式类似：
+```c++
+{
+"maximum_load": 42,
+"total_load": 162,
+"routes": [
+{
+"robot": "a",
+"travel_cost": 22,
+"service_cost": 19,
+"stops": [],
+"schedule": []
+}
+]
+}
+```
+4. 当前支持的地图类型
+
+当前正式支持的是二维栅格地图：
+```
+有限矩形区域
+整数坐标
+四方向移动
+障碍物占据栅格
+每次移动代价为 1
+允许原地等待
+```
+对应代码：
+
+- /home/jazzy/cpp/capability_mission_planner/include/capability_mission_planner/grid_path_planner.hpp
+- /home/jazzy/cpp/capability_mission_planner/src/grid_path_planner.cpp
+
+当前不直接支持：
+
+- 点线拓扑地图
+- 室内拓扑图
+- 经纬度 GIS 地图
+- 带道路方向、限速、坡度、区域通行规则的地图
+- 连续坐标运动学地图
+
+5. 点线地图是否可以适配
+
+可以，但当前需要增加图搜索适配层。
+
+点线地图可以表示为：
+```
+节点:
+A、B、C、D
+
+边:
+A-B，代价 10
+B-C，代价 4
+A-D，代价 7
+```
+然后将路径规划从：
+```c++
+GridPathPlanner
+```
+抽象为类似：
+```c++
+class PathPlanner {
+public:
+virtual Path plan(LocationId start, LocationId goal) const = 0;
+virtual int distance(LocationId start, LocationId goal) const = 0;
+};
+```
+再实现：
+```c++
+GraphPathPlanner
+```
+其内部使用 A* 或 Dijkstra。
+
+但 CBS 也需要同步从二维坐标冲突检测改为图节点和图边冲突检测。也就是说：
+
+栅格地图冲突:
+两个机器人占用同一个栅格
+两个机器人交换相邻栅格
+
+点线地图冲突:
+两个机器人占用同一个节点
+两个机器人同时使用同一条边
+可能还需要处理边方向和边容量
+
+6. GIS 地图是否可以适配
+
+可以，但不能直接把经纬度传给当前算法。
+
+通常需要经过以下转换：
+```
+GIS 经纬度/道路数据
+        ↓
+坐标投影，例如 UTM
+        ↓
+栅格化，得到 occupancy grid
+        ↓
+当前 GridPathPlanner
+```
+或者：
+```
+GIS 道路网络
+        ↓
+提取节点和边
+        ↓
+GraphPathPlanner
+        ↓
+图上的 A*/CBS
+```
+两种方式分别适合不同场景：
+```
+地图来源                      适配方式          适合场景
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GIS 栅格、占用图、激光地图    转换为 GridMap    室内导航、障碍物密集环境
+────────────────────────────  ────────────────  ──────────────────────────────
+GIS 道路中心线、楼层拓扑      转换为节点边图    园区道路、楼宇拓扑、仓库通道
+────────────────────────────  ────────────────  ──────────────────────────────
+原始经纬度                    不能直接使用      必须先投影和尺度转换
+```
+7. 当前实现的几个边界
+
+当前代码中：
+
+- earliest_start_time 会被保存，但还没有真正约束机器人不得提前执行任务；
+- TaskPriority 主要影响任务处理顺序，不是严格的时间调度优先级；
+- category、labels 会被保留，但能力匹配目前依赖 requirements 字段；
+- 路径代价是离散步数，不是实际米数或秒数；
+- GridMap 的移动模型是四方向，不包含机器人尺寸、转弯半径和速度；
+- GIS 和点线地图需要增加地图适配器及相应的路径/冲突模型。
+
+因此，当前项目可以概括为：
+```
+输入:
+栅格地图 + 机器人能力/起点 + 带属性的任务
+
+处理:
+能力约束分配
+A* 路径代价
+最大负载/总负载优化
+CBS 时空冲突消解
+
+输出:
+每台机器人任务顺序、负载、停靠点和离散时间轨迹
+```
+它现在是一个“栅格地图上的能力感知多机器人任务规划器”，而不是通用 GIS/道路网络规划器；不过核心任务分配和 CBS 结构可以复用到后续的点线地图和 GIS 适配版本中。
+
+
+问题:
+## 以 @/home/jazzy/cpp/capability_mission_planner/tmp/image.png 这张栅格为例，完成 capability_mission_planner 的验证。并且输出一张包含规划结果的 png。
+
+处理流程：
+- 原图：335×447
+- 转换为：67×90 规划栅格，每格 5×5 像素
+- 白色区域作为候选自由空间
+- 黑色墙体作为障碍
+- 灰色地图外区域不可通行
+- 保留最大连通自由区域，过滤扫描噪点
+- 设置 3 台机器人、8 个不同能力需求任务
+- 执行能力匹配、任务分配、A* 路径规划、负载优化和 CBS 冲突消解
+
+规划结果：
+```
+机器人 a：3 个任务，2 个停靠点，负载 65
+机器人 b：1 个任务，1 个停靠点，负载 133
+机器人 c：4 个任务，4 个停靠点，负载 131
+
+最大负载：133
+总负载：329
+```
+程序自动验证：
+- 8 个任务全部且仅分配一次
+- 所有任务均分配给能力匹配的机器人
+- 所有停靠点和时间轨迹均位于可通行栅格
+- 不存在机器人同一时刻占据同一栅格
+- 不存在机器人对向交换栅格的边冲突
+
+新增的可重复验证程序是 /home/jazzy/cpp/capability_mission_planner/examples/image_map_demo.cpp，并已加入 CTest。当前测试结果为 2/2 通过。
+
+复现命令：
+```
+cd /home/jazzy/cpp/capability_mission_planner
+cmake -S . -B build-image -DCMAKE_BUILD_TYPE=Release
+cmake --build build-image --parallel
+ctest --test-dir build-image --output-on-failure
+
+./build-image/image_map_demo \
+tmp/image.png \
+tmp/capability_mission_plan.png
+```
+
+问题:
+1. 请给我描述刚才的场景和规划过程，让我有一个直观认识
+
+说明:
+1. @/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例/1 是某实际场景的栅格地图、地图和导航用坐标系之间的转换关系
+2. @/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例/2 是某多层场景的栅格地图、地图和导航用坐标系之间的转换关系、地图之间的传送关系
+3. 多楼层地图分为构建与使用两个节点：
+- 构建部分参考 @/home/jazzy/nav_t_ws/src/gridmapper，其中global.launch.py
+- 使用部分参考 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2
+请对栅格地图示例、栅格地图和nav2导航坐标转换关系、多地图传送关系等进行分析，给 capability_mission_planner 添加一个适配的包装，放在 src/ 下的单独模块。先评估可行性和实施方案，不要修改源码。
+
+
+问题:
+1. 按照你的方案完成，但注意先不要做 ros2 封装，因为算法输出不会直接通过 ros2 传给机器人(考虑多机情况)，算法先输出在本地目录(算法结果、经过的栅格地图显示路径)，并适配单地图、多地图。
+
+2. 为什么会生成这么多 build**/ 文件夹，只要有一个 build 就够了。我该如何使用该 capability_mission_planner，如何输入，输出会在哪里？另外，没有配置项(config)可以配置算法参数吗？
+
+3. @/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例/1 请在这个场景上设置不同数量机器人、不同能力机器人、不同点位、不同属性任务的多种情形(建立不同 config，放在 config 下某子文件夹下)进行覆盖测试
+
+问题:
+1. @/home/jazzy/cpp/capability_mission_planner/src/nav2_multi_map_adapter/multi_map_coordinator.hpp 为什么不在 include 里，而在 src 里，这符合 c++ 规范吗？
+2. nav2_multi_map_adapter 这个文件夹名称是否过于冗余，叫 multi_map_adapter 是否更好
+3. nav2_multi_map_adapter 改为 multi_map_adapter 是否更好
+
+问题:
+1. 像这些 @/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例、@/home/jazzy/cpp/capability_mission_planner/config，我打算移动到一个新建的单独项目里，因为可能会添加很多新的场景。你觉得呢？客观分析。
+2. 按照你说的移动到新项目，但注意:
+- 留在 capability_mission_planner 里的示例数据不要放在 tmp/ 下了，因为 tmp/会被 .gitignore 忽略
+- @/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例/1 实际的场景名称是 zju2，@/home/jazzy/cpp/capability_mission_planner/tmp/栅格示例/2 实际的场景名称是 myj1
+
+问题:
+1. @/home/jazzy/nav_t_ws/src/navigation2 这里面的全局规划应该考虑了膨胀体积等问题，请查看对我们 @/home/jazzy/cpp/capability_mission_planner 有什么借鉴价值，提高算法鲁棒性和落地应用可能性
+
+2. 将你刚才的思路输出到 @/home/jazzy/cpp/capability_mission_planner/docs 下，并完成你的实施
+- 注意： capability_mission_planner 的输出会给 nav2 用，但 planner 是任务级的路径，只要满足任务级约束即可，同时借鉴 nav2 中部分思想。再次评估落地方案。
+
+3. @/home/jazzy/cpp/capability_mission_scenarios/configs/zju2 也按照新的算法结构修改，如果有目标点位置极端的，可以修改
+- @/home/jazzy/cpp/capability_mission_scenarios/configs/myj1.yaml 如果有目标点位置极端的，可以修改。需要设置每个机器人的"clearance_radius_m  safety_margin_m"
+
+
+问题:
+1. 将 @/home/jazzy/cpp/capability_mission_scenarios/tmp/map_000.png、map_000.yaml 放入 configs maps，并改称 bdz1，测试场景(3个机器人分别位于四角，中间可通行路径有 10 多个点位(挂载不同任务))，测试算法能力。
+
+2. 在 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1 添加新场景，这个场景所有机器人能力一样，所有点位属性一样，从而确认生成的路径是否最短/接近最短
+
+3. 在 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1 添加新场景，这个场景所有机器人能力一样，所有点位属性一样，从而确认生成的路径是否最短/接近最短(但这个场景中三个机器人起始都处于接近的区域，从而模拟充电桩都在一个区域的情形)
+
+4. @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/02_homogeneous_shortest_path_benchmark.yaml 比 03_homogeneous_shared_charger_benchmark.yaml 运行慢不少，运行时间消耗主要产生在哪里？另外能否增加算法运行时间显示。
+
+5. 现在 a* 对栅格的搜索是否按照栅格的每一片尺寸，我觉得搜索可以用多片栅格组合作为一片进行搜索(可调整)，@/home/jazzy/nav_t_ws/src/navigation2 中我记得有类似的实现。这样是否能大幅减少搜索时间，请查看并客观分析。
+
+6. 我觉得这种提升意义不大，我觉得直接改为类似 navigation2(@/home/jazzy/nav_t_ws/src/navigation2) 降采样(可配置)粗筛选即可，因为实际机器人肯定也比单栅格大，你觉得呢？
+
+7. 请给我解释一下这个输出 @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/02_homogeneous_shortest_path_benchmark1/plan.json，其输出点是哪些，只有任务点位吗
+
+8. @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/02_homogeneous_shortest_path_benchmark.yaml 改为 "coordinate_conflicts: true" 出现 "planning failed: route segment does not start at the current position"，为什么？如何处理？
+
+9. @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/02_homogeneous_shortest_path_benchmark1/plan.json 中 "schedule" 代表什么？为什么会这么长？
+
+问题:
+1. 应该以什么方式修改 schedule 的稠密方式表达，当前 capability_mission_planner 是以什么方式解决冲突问题？
+
+### 2. 我指的是你当前的冲突判断，是否符合实际场景？比如我适配2条机器狗的协同，机器狗最小 1m 以上，进行如此稠密的判断是否有意义？客观分析。
+
+按照该方案修改
+```
+最值得优先改进的不是压缩 schedule，而是：
+1. 增加机器人 外接圆配置。
+2. 将顶点冲突改为安全距离冲突。
+3. 将边冲突改为连续运动扫掠冲突。
+4. 为窄通道和交叉口增加区域资源及时间缓冲。
+5. 将 schedule 定位为参考计划，执行时采用实时进度驱动的预约机制。
+6. JSON 再使用区间压缩表达，避免输出几千条逐 tick 状态。
+```
