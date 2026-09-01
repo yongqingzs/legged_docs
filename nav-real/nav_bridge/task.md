@@ -40,7 +40,7 @@
 2. d1_max 有两个主机
 - 运动主机: ssh robot@192.168.234.1(密码: bot)
 - 导航主机(需先连接运动主机再 ssh): ssh robot@192.168.168.100(密码: 1)
-3. 请在 nav_bridge 部署再 d1_max 导航主机的 ~/Workspace/driver_ws/src 下
+3. 请在 nav_bridge 部署在 d1_max 导航主机的 ~/Workspace/driver_ws/src 下
 4. 真机测试 nav_bridge 对 d1_max 的适配是否正确
 
 问题:
@@ -219,3 +219,48 @@ D1 如何适配？实现类似的效果，充电先显示不支持
 ## D1 imu/data 这个话题要不先直接转发 /imu_driver/imu_central？你觉得如何，合理吗？
 
 ## 当前 x30_nav_bridge 是选择性编译的吗(因为你之前对 cmake 的修改)？
+```
+colcon build --packages-select nav_bridge \
+--cmake-args -DNAV_BRIDGE_BUILD_X30=OFF \
+-DNAV_BRIDGE_BUILD_D1_MAX=ON
+```
+
+问题:
+1. 照当前的修改，@/home/jazzy/drive_ws/src/nav_bridge/include/nav_bridge/x30/nav_bridge_base.hpp 适合成为 d1_max 和 x30 的共同基类吗？也就是舍弃 d1_max_backend、robot_backend，以重新建立子类。客观分析。
+
+说明:
+1. 当前已经连接 d1_max
+2. d1_max 有两个主机
+- 运动主机: ssh robot@192.168.234.1(密码: bot)
+- 导航主机(需先连接运动主机再 ssh): ssh robot@192.168.168.100(密码: 1)
+3. 请将 nav_bridge 更新在 d1_max 导航主机的 ~/Workspace/driver_ws/src 下
+4. 真机测试 nav_bridge 对 d1_max 的适配是否正确，你先测试 imu 消息(ros2 转发)是否正常达到 200hz
+5. 测试完成后请清理进程
+
+问题:
+1. 我发现我在导航主机上启动，/imu/data 只有 170 hz
+2. 一直打印"IMU callback count=800 elapsed=64.5646 s rate=12.3907 Hz"，我是不需要这个打印的，另外为什么显示 12.3907 hz，难道转发 ros2 消息时也在读取回调里的 imu 数据吗？打印需要删除，并且需要分析当前 imu 数据是否并行读取。
+3. 测试完成后请清理进程
+先分析，出解决方案
+
+解决方案:
+第一步，删除 SDK IMU 频率打印。
+
+第二步，默认 imu_driver 模式下不启用 SDK IMU 配置和接收；imu_source=sdk 时才启用。imu_driver 同理
+
+第三步，将 /imu/data 发布器改为传感器数据 QoS，降低可靠传输背压：
+```
+imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
+    "/imu/data", rclcpp::SensorDataQoS());
+```
+第四步，在导航主机重新测量：
+```
+ros2 topic hz /imu_driver/imu_central
+ros2 topic hz /imu/data
+ros2 topic info /imu/data -v
+```
+
+问题:
+1. 当前 d1 切换 lie 是什么流程，我实机测试，怎么会有撞击地面的情况？不是先匍匐模式再卧倒吗？
+
+2. 当前 d1 切换为通用模式后，应该能接收 /cmd_vel 信息，我该如何用键盘测试其是否正常，说明并写入 @/home/jazzy/agent_ws/src/legged_docs/nav-real/nav_bridge/D1_MAX_MANUAL_TEST_CHECKLIST.md

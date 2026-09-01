@@ -881,3 +881,8 @@ tmp/capability_mission_plan.png
 5. 将 schedule 定位为参考计划，执行时采用实时进度驱动的预约机制。
 6. JSON 再使用区间压缩表达，避免输出几千条逐 tick 状态。
 ```
+
+对于 @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/03_homogeneous_shared_charger_benchmark/plan.json 我有如下问题:
+1. 这个 schedule_intervals 的显示是无意义的，因为虽然和之前比它的长度缩减的(只统计不重复栅格)，但实际任务级规划精确到单栅格显示是否有必要？并且机器人一般占据半径 0.5 m 的圆以上。是否可以将 coarse_search_factor 考虑进去，或者有更好的显示方案
+2. 虽然 gcs 会计算冲突，但当前输出的是 stops(任务点)，那么这部分冲突协调是否没起真正作用？虽然当前规划是离线的，但是在任务点之间插一些关键点来避免冲突是否更好？
+请客观分析，绝不能主观倾向我，先不要修改源码。你应该思考真正有价值的方案，@/home/jazzy/rmf_ws/src/rmf 中离线部分的冲突协调思路或许有所帮助。

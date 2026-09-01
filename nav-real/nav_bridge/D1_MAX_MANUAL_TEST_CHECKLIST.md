@@ -187,7 +187,104 @@ ros2 topic echo /robot_fault
 
 在确认控制权前，不要发送非零速度。
 
-## 8. 姿态动作测试（高风险）
+## 8. 通用模式键盘控制测试
+
+切换到 D1 通用模式后，可以使用 ROS2 `teleop_twist_keyboard` 验证
+`/cmd_vel` 是否被 nav_bridge 正确接收并转发。该测试会使机器狗实际运动，
+必须确认周围无障碍、有人看护并随时准备释放键盘或触发急停。
+
+### 8.1 准备环境
+
+在导航主机的终端 A 启动 nav_bridge，并在终端 B 加载相同环境：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/setup.bash
+export ROS_DOMAIN_ID=24
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+```
+
+确认当前模式和状态：
+
+```bash
+ros2 topic echo /robot_basic_state --once
+ros2 topic echo /robot_gait_state --once
+```
+
+### 8.2 切换通用模式并站立
+
+建议先使用中速通用模式 `MOUNTAIN(33)`：
+
+```bash
+ros2 service call /nav_bridge_node/set_gait \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: gait, value: {type: 4, string_value: 'MOUNTAIN'}}]}"
+```
+
+如果机器狗尚未站立，在安全看护下执行：
+
+```bash
+ros2 service call /nav_bridge_node/stand std_srvs/srv/Trigger "{}"
+```
+
+确认 `/robot_gait_state` 为 `33`，并且 `/robot_basic_state` 为可运动状态后再继续。
+
+### 8.3 启动键盘节点
+
+如果系统尚未安装：
+
+```bash
+sudo apt install ros-humble-teleop-twist-keyboard
+```
+
+启动键盘控制：
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args -r cmd_vel:=/cmd_vel
+```
+
+常用按键（以键盘节点启动后显示的帮助为准）：
+
+```text
+i / , / o / u / . / m    前进、后退及斜向移动
+j / l                    左转、右转
+k                        发送零速度
+q / z                    提高/降低速度档位
+CTRL-C                   退出键盘节点
+```
+
+只按住一个方向键，观察机器狗是否按预期运动；松开按键后键盘节点会继续发布
+零速度或停止指令。也可以在终端 C 观察转发链路：
+
+```bash
+ros2 topic echo /cmd_vel
+ros2 topic echo /robot_basic_state
+ros2 topic echo /robot_gait_state
+```
+
+验证要点：
+
+- `MOUNTAIN` 模式下，`/cmd_vel` 的 `linear.x` 控制前后，`linear.y` 控制左右，`angular.z` 控制转向；
+- nav_bridge 以 `cmd_vel_rate_hz`（默认 50 Hz）定频调用 SDK `Move()`；
+- 未持有控制权时，收到 `/cmd_vel` 会先申请 `TakeControl()`；
+- 当前状态不允许运动、动作服务执行中或指令超过 `cmd_vel_timeout_ms`（默认 500 ms）时，nav_bridge 会发送零速度；
+- 仅看到 `/cmd_vel` 消息而机器狗不动，需检查 `/robot_basic_state`、控制权和 SDK 连接日志，不要连续提高速度。
+
+### 8.4 结束测试
+
+先按 `k` 发送零速度，再按 `CTRL-C` 退出键盘节点；确认机器狗停止后释放控制权：
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+ros2 service call /nav_bridge_node/release_control std_srvs/srv/Trigger "{}"
+```
+
+如果运动方向与预期相反，立即发送零速度并触发软急停，然后记录
+`/cmd_vel`、D1 模式和实际运动方向；不要在现场直接修改坐标变换。
+
+## 9. 姿态动作测试（高风险）
 
 以下命令会实际改变机器狗姿态，只能在安全看护条件下执行：
 
@@ -227,7 +324,7 @@ ros2 service call /nav_bridge_node/charge_command \
   "{parameters: [{name: charge_command, value: {type: 2, integer_value: 0}}]}"
 ```
 
-## 9. 推荐现场顺序
+## 10. 推荐现场顺序
 
 1. 检查节点、话题和服务是否存在。
 2. 检查 IMU、里程计、关节和电池数据。
@@ -238,7 +335,7 @@ ros2 service call /nav_bridge_node/charge_command \
 7. 确认机器狗状态后，再低速发送非零 `/cmd_vel`。
 8. 测试结束发送零速度并调用 `release_control`。
 
-## 10. 当前已知限制
+## 11. 当前已知限制
 
 - 未经安全看护不得执行 `stand`、`lie` 或非零 `/cmd_vel`。
 - D1 的 `set_body_height` 和 `charge_command` 当前仅返回不支持。
@@ -249,7 +346,7 @@ ros2 service call /nav_bridge_node/charge_command \
 - `imu_source` 默认是 `imu_driver`，SDK 源仅作为备用选项。
 - 现场测试应记录 SDK 连接日志、各话题频率、速度方向和控制权释放结果。
 
-## 11. IMU 频率排查说明
+## 12. IMU 频率排查说明
 
 默认配置下 `/imu_driver/imu_central` 是输入，`/imu/data` 是 nav_bridge 转发输出；只有设置 `imu_source=sdk` 时才使用 RobotSDK 链路。
 
@@ -282,7 +379,7 @@ RobotSDK-0.2.1 文档规定 `SetImuConfig` 的频率范围为 `[0, 100]`，因�
 
 如果启动日志出现 `Robot Controlled denial of service`，先检查是否有多个 nav_bridge/SDK 客户端连接运动主机；RobotSDK 文档明确多客户端会触发控制拒绝。清理重复进程后再测频率，避免把连接冲突误判为 IMU 丢帧。
 
-### 11.1 SDK 示例对照结果
+### 12.1 SDK 示例对照结果
 
 RobotSDK-0.2.1 官方 `example/data.cpp` 在导航主机使用同一 arm64 库、同一目标 `192.168.168.168:8082` 测试时，`SetImuConfig(200)` 虽然会被 SDK/机器人端限制在合法范围内，但在开启 IMU 的约 3 秒阶段实际收到约 246 次 `OnImuData` 回调，约 80 Hz。该结果说明机器人端和 SDK 接收线程能够提供远高于 13 Hz 的数据，`nav_bridge` 的数据转换不是天然只能达到 13 Hz。
 
@@ -295,13 +392,13 @@ ros2 topic hz /imu/data
 
 测试时还要保证只有一个 `d1_max_nav_bridge_node` 进程，否则多个 SDK 客户端会触发 `Controlled denial`，造成连接或数据状态异常。当前结论是：13 Hz 首先应视为 ROS/Zenoh 订阅观测值或发布端可靠 QoS 背压，不能据此断定 RobotSDK 仅上报 13 Hz；官方示例回调计数证明 SDK 链路实际可达到约 80 Hz。SDK 文档规定 IMU 请求频率上限为 100 Hz，若要确认是否能稳定达到 100 Hz，还需用轻量回调计数程序连续测量，而不是依赖打印型示例或 `ros2 topic hz` 单一结果。
 
-### 11.2 最新复测：IMU 配置未生效
+### 12.2 最新复测：IMU 配置未生效
 
 本次在导航主机清理重复 `nav_bridge` 后重新测试，节点日志显示 SDK 连接成功，但 `/imu/data` 在测量窗口内没有消息。随后停止 `nav_bridge`，单独运行同一份 RobotSDK-0.2.1 arm64 官方 `data` 示例，示例同样显示连接成功但没有 `OnImuData` 回调。因此本轮故障不是 ROS 消息转换或 `ros2 topic hz` 单独造成的，更像是机器人端 IMU 上报配置未生效或服务端传感器订阅状态异常。
 
 代码侧需重点核查：`D1MaxBackend::connect()` 在 `Connect(..., true)` 返回后立即异步调用 `SetImuConfig(100)`，没有等待发送结果，也没有实现 `IControlCallback::OnImuConfig` 确认机器人是否接受配置；官方示例则是在连接完成回调成功后才开始传感器配置。若配置命令在握手完成后的短窗口内被丢弃，节点仍会打印 `connected`，但不会有 IMU 数据。后续修复应采用同步发送或回调确认、记录错误码，并在配置失败时重试。
 
-### 11.3 控制锁恢复后的最终实测
+### 12.3 控制锁恢复后的最终实测
 
 控制锁释放后，使用修复版导航主机二进制单客户端运行，SDK 输出：
 
