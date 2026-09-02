@@ -264,3 +264,58 @@ ros2 topic info /imu/data -v
 1. 当前 d1 切换 lie 是什么流程，我实机测试，怎么会有撞击地面的情况？不是先匍匐模式再卧倒吗？
 
 2. 当前 d1 切换为通用模式后，应该能接收 /cmd_vel 信息，我该如何用键盘测试其是否正常，说明并写入 @/home/jazzy/agent_ws/src/legged_docs/nav-real/nav_bridge/D1_MAX_MANUAL_TEST_CHECKLIST.md
+
+3. 这是对应 d1 通用模式的切换:
+```
+ros2 service call /nav_bridge_node/set_gait \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: gait, value: {type: 2, integer_value: 33}}]}"
+```
+其他模式应该发什么: "type: 2, integer_value: 33"
+
+## 最新的 D1 连接方式
+说明:
+1. 当前已经连接 d1_max
+2. d1_max 有两个主机
+- 运动主机: ssh robot@10.0.40.216(密码: bot)
+- 导航主机(需先连接运动主机再 ssh): ssh robot@192.168.168.100(密码: 1)
+3. 请将 nav_bridge 更新在 d1_max 导航主机的 ~/Workspace/driver_ws/src 下
+4. 真机测试 nav_bridge 对 d1_max 的适配是否正确，你先测试 imu 消息(ros2 转发)是否正常达到 200hz
+5. 测试完成后请清理进程
+
+## D1 自主充电
+问题:
+1. @/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh 中有提供关于 D1 MAX 自主充电的说明吗？@/home/jazzy/drive_ws/src/RobotSDK-0.2.1/example/recharge.cpp 里是关于 D1 MAX 自主充电的实现示例吗？参考 X30 评估一下 D1 MAX 自主充电的实现方案。
+
+2. @/home/jazzy/drive_ws/src/Agibot_D1_Max/docs/source/5.2自主回充说明.md 这是老版本 sdk 对 d1 自主充电的说明，@/home/jazzy/drive_ws/src/RobotSDK-0.2.1 的 example 中 "./control 192.168.168.168 8081 192.168.168.100 10010" 是否实现一样的功能
+
+```bash
+./control 10.0.40.216 8081 192.168.168.100 10010
+```
+
+3. @/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh/sdk_recharge_task_zh.md 是否就是 0.2.1 sdk关于自主充电的最新说明，请分析，我们需要测试哪些接口？现有 recharge 示例是否能满足测试接口的要求，其如何用？
+
+假设 0.2.1 的接口正常，操作要求: "将四足机器人D1 Max设备正对充电桩，设备头部距离充电桩1.5m左右，确保在相机视野中可完整看到充电桩的二维码"，该如何在 nav_bridge 新增对 d1 自主充电的支持，类似 x30 评估方案。
+
+4. 当前先认为假设成立，因为充电桩还在修。另外，nav_bridge 启用充电前会先由 nav_bridge 的上层导航移动至"将四足机器人D1 Max设备正对充电桩，设备头部距离充电桩1.5m左右，确保在相机视野中可完整看到充电桩的二维码"。所以先实现你的方案，并且将方案写入 @/home/jazzy/agent_ws/src/legged_docs/nav-real/nav_bridge。
+
+这是:
+```
+## 最新的 D1 连接方式
+说明:
+1. 当前已经连接 d1_max
+2. d1_max 有两个主机
+- 运动主机: ssh robot@10.0.40.216(密码: bot)
+- 导航主机(需先连接运动主机再 ssh): ssh robot@192.168.168.100(密码: 1)
+3. 测试完成后请清理进程
+```
+我在导航主机(Jetson NX 16g)上通过 apt 安装了 opencl，但显示:
+```
+robot@orin-nx:~$ clinfo
+Number of platforms  0
+```
+请查看，并设计实施方案使得 OpenCL 真正能调用 nx 上的 gpu。
+
+
+
+

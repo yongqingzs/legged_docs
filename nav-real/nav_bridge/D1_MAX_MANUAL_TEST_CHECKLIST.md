@@ -2,6 +2,19 @@
 
 本文用于在 D1 Max 导航主机上启动 `nav_bridge` 后，手动验证 SDK 连接、ROS 话题和控制接口。姿态动作及非零速度测试必须在机器狗周围无障碍、急停可用并有现场人员看护时执行。
 
+## 连接 WIFI
+```bash
+ssh robot@192.168.234.1
+#登录到 rk 中
+wpa_passphrase FHZN FHZN1234 > /home/robot/FHZN_WIFI.conf
+sudo wpa_supplicant -B -i wlan0 -c /home/robot/FHZN_WIFI.conf
+```
+
+```bash
+ssh robot@10.0.40.216   m:bot
+ssh robot@192.168.168.100   m: 1
+```
+
 ## 1. 启动节点
 
 在导航主机终端执行：
@@ -155,7 +168,36 @@ ros2 service call /nav_bridge_node/set_speed \
 ros2 service call /nav_bridge_node/set_gait \
   rcl_interfaces/srv/SetParameters \
   "{parameters: [{name: gait, value: {type: 2, integer_value: 33}}]}"
+
+# WALK，低速通用模式
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+"{parameters: [{name: gait, value: {type: 2, integer_value: 0}}]}"
+
+# RUN，高速通用模式
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+"{parameters: [{name: gait, value: {type: 2, integer_value: 3}}]}"
+
+# 楼梯模式
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+"{parameters: [{name: gait, value: {type: 2, integer_value: 6}}]}"
+
+# L_STAIR 楼梯模式
+ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
+"{parameters: [{name: gait, value: {type: 2, integer_value: 36}}]}"
 ```
+
+| 模式 | `integer_value` | D1 实现 |
+|---|---:|---|
+| `WALK` | 0 | 通用模式 + 低速 |
+| `RUN` | 3 | 通用模式 + 高速 |
+| `STAIR_SOLID` | 6 | 登阶模式 |
+| `STAIR_ACC` | 7 | 登阶模式 |
+| `STAIR45_ACC` | 8 | 登阶模式 |
+| `L_WALK` | 32 | 通用模式 + 低速 |
+| `MOUNTAIN` | 33 | 通用模式 + 中速 |
+| `SILENT` | 34 | 通用模式 + 中速 |
+| `L_STAIR` | 36 | 登阶模式 |
+
 
 当前 D1 适配使用与 X30 一致的 `set_gait` 导航语义：
 
