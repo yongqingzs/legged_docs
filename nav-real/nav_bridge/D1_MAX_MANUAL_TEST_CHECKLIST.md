@@ -354,19 +354,162 @@ ros2 service call /nav_bridge_node/soft_estop std_srvs/srv/Trigger "{}"
 ros2 service call /nav_bridge_node/release_control std_srvs/srv/Trigger "{}"
 ```
 
-以下接口目前保留用于兼容 X30，但 D1 会明确返回不支持，不会执行动作：
+`set_body_height` 目前保留用于兼容 X30，但 D1 会明确返回不支持，不会执行动作：
 
 ```bash
 ros2 service call /nav_bridge_node/set_body_height \
   rcl_interfaces/srv/SetParameters \
   "{parameters: [{name: body_height, value: {type: 4, string_value: 'NORMAL'}}]}"
+```
 
+## 10. 自主充电测试（高风险）
+
+本节假设充电桩、D1 机器人端和 RobotSDK-0.2.1 的充电任务服务正常。`nav_bridge`
+不会将机器人导航到充电桩；上层导航必须先将机器人移动到满足以下条件的前置位：
+
+```text
+机器人正对充电桩
+头部距离充电桩约 1.5 m
+相机完整看到充电桩二维码
+```
+
+充电/离桩动作可能让机器人自行运动。测试区域必须清空，现场必须有人员看护；测试时只能保留一个 SDK 客户端，不能同时运行 `recharge` 示例、其他 nav_bridge 或其他 SDK 控制程序。
+
+### 10.1 准备和状态观察
+
+在导航主机加载运行时环境：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/Workspace/driver_ws/install/setup.bash
+export ROS_DOMAIN_ID=24
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+```
+
+启动 nav_bridge 后，先观察状态话题：
+
+```bash
+ros2 topic echo /charge_manager_state
+ros2 topic echo /robot_basic_state
+ros2 topic echo /robot_fault
+```
+
+当前 D1 到 X30 兼容状态的映射为：
+
+```text
+0 = 空闲、无任务或任务已停止
+1 = 充电任务启动中/执行中
+2 = 机器人处于 RECHARGE（充电模式）
+3 = 离桩任务启动中/执行中
+4 = 任务失败
+```
+
+`/charge_manager_state` 是 D1 SDK 的任务状态映射，不是 X30 感知主机的原生状态码。任务的具体阶段和错误码当前以 nav_bridge 日志及后续 SDK 诊断为准。
+
+### 10.2 启动充电任务
+
+上层导航确认机器人已到达前置位后，调用：
+
+```bash
 ros2 service call /nav_bridge_node/charge_command \
   rcl_interfaces/srv/SetParameters \
   "{parameters: [{name: charge_command, value: {type: 2, integer_value: 0}}]}"
 ```
 
-## 10. 推荐现场顺序
+等价字符串命令：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 4, string_value: 'START'}}]}"
+```
+
+预期服务先返回 SDK 命令发送/协议确认结果。随后观察 `/charge_manager_state`：
+
+```text
+0 -> 1 -> 2
+```
+
+其中 `1` 表示 `RECHARGING` 任务进入 `STARTING` 或 `RUNNING`，`2` 表示 SDK
+报告 `MachineStatus::RECHARGE`。充电任务按 SDK 文档可能长期保持 `RUNNING`，不应等待自然 `SUCCESS`。
+
+充电任务开始后，nav_bridge 会抑制普通 `/cmd_vel` 并发送零速度。不要再运行键盘控制或发布非零 `/cmd_vel`。
+
+### 10.3 查询任务状态
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 3}}]}"
+```
+
+或：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 4, string_value: 'QUERY'}}]}"
+```
+
+服务返回文本中的 `D1 charge state=<n>` 应与 `/charge_manager_state` 当前值一致。
+
+### 10.4 停止充电任务
+
+需要中止或结束充电任务时调用：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 1}}]}"
+```
+
+或使用 `STOP` 字符串。服务返回成功仅表示停止命令发送成功；应继续观察状态，直到任务停止并回到：
+
+```text
+/charge_manager_state = 0
+```
+
+### 10.5 离桩测试
+
+仅当机器人已处于充电桩相关状态、周围空间允许离桩运动时执行：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 4}}]}"
+```
+
+或：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 4, string_value: 'UNDOCK_START'}}]}"
+```
+
+预期 `/charge_manager_state` 进入 `3`。离桩任务正常完成后应回到 `0`；若进入 `4`，停止测试并记录 SDK 错误信息。
+
+需要中途停止离桩时：
+
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 5}}]}"
+```
+
+`RESET(2)` 是 X30 充电管理器的复位语义。D1 RobotSDK-0.2.1 没有明确等价接口，当前 D1 会返回不支持；不要用它代替 `STOP` 或离桩。
+
+### 10.6 测试收尾
+
+确认任务停止或离桩完成后再恢复导航控制。若需人工接管，先发送零速度，然后调用：
+
+```bash
+ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
+ros2 service call /nav_bridge_node/release_control std_srvs/srv/Trigger "{}"
+```
+
+## 11. 推荐现场顺序
 
 1. 检查节点、话题和服务是否存在。
 2. 检查 IMU、里程计、关节和电池数据。
@@ -377,18 +520,19 @@ ros2 service call /nav_bridge_node/charge_command \
 7. 确认机器狗状态后，再低速发送非零 `/cmd_vel`。
 8. 测试结束发送零速度并调用 `release_control`。
 
-## 11. 当前已知限制
+## 12. 当前已知限制
 
 - 未经安全看护不得执行 `stand`、`lie` 或非零 `/cmd_vel`。
-- D1 的 `set_body_height` 和 `charge_command` 当前仅返回不支持。
-- `/charge_manager_state` 固定发布 `-1`，不能用于判断真实充电状态。
+- D1 的 `set_body_height` 当前仅返回不支持。
+- `/charge_manager_state` 是 D1 SDK 任务状态到 X30 兼容语义的映射，不是原生 X30 状态码。
+- 充电桩维修期间，尚未完成 `StartRechargeTask()`、`StopRechargeTask()` 和离桩任务的完整真机验证。
 - `body_height_state` 只能根据 `Crawl/CrawlWalk` 推断，RobotSDK 的 `HighLowStance` 反馈尚未接入。
 - `/robot_basic_state`、`/robot_gait_state`、`/robot_body_height_state`、`/charge_manager_state` 即使未持有控制权也会持续发布。
 - `/cmd_vel` 只有在持有控制权、动作未被抑制且 MotionStatus 允许时才转发；超时后持续发送零速度。
 - `imu_source` 默认是 `imu_driver`，SDK 源仅作为备用选项。
 - 现场测试应记录 SDK 连接日志、各话题频率、速度方向和控制权释放结果。
 
-## 12. IMU 频率排查说明
+## 13. IMU 频率排查说明
 
 默认配置下 `/imu_driver/imu_central` 是输入，`/imu/data` 是 nav_bridge 转发输出；只有设置 `imu_source=sdk` 时才使用 RobotSDK 链路。
 
@@ -421,7 +565,7 @@ RobotSDK-0.2.1 文档规定 `SetImuConfig` 的频率范围为 `[0, 100]`，因�
 
 如果启动日志出现 `Robot Controlled denial of service`，先检查是否有多个 nav_bridge/SDK 客户端连接运动主机；RobotSDK 文档明确多客户端会触发控制拒绝。清理重复进程后再测频率，避免把连接冲突误判为 IMU 丢帧。
 
-### 12.1 SDK 示例对照结果
+### 13.1 SDK 示例对照结果
 
 RobotSDK-0.2.1 官方 `example/data.cpp` 在导航主机使用同一 arm64 库、同一目标 `192.168.168.168:8082` 测试时，`SetImuConfig(200)` 虽然会被 SDK/机器人端限制在合法范围内，但在开启 IMU 的约 3 秒阶段实际收到约 246 次 `OnImuData` 回调，约 80 Hz。该结果说明机器人端和 SDK 接收线程能够提供远高于 13 Hz 的数据，`nav_bridge` 的数据转换不是天然只能达到 13 Hz。
 
@@ -434,13 +578,13 @@ ros2 topic hz /imu/data
 
 测试时还要保证只有一个 `d1_max_nav_bridge_node` 进程，否则多个 SDK 客户端会触发 `Controlled denial`，造成连接或数据状态异常。当前结论是：13 Hz 首先应视为 ROS/Zenoh 订阅观测值或发布端可靠 QoS 背压，不能据此断定 RobotSDK 仅上报 13 Hz；官方示例回调计数证明 SDK 链路实际可达到约 80 Hz。SDK 文档规定 IMU 请求频率上限为 100 Hz，若要确认是否能稳定达到 100 Hz，还需用轻量回调计数程序连续测量，而不是依赖打印型示例或 `ros2 topic hz` 单一结果。
 
-### 12.2 最新复测：IMU 配置未生效
+### 13.2 最新复测：IMU 配置未生效
 
 本次在导航主机清理重复 `nav_bridge` 后重新测试，节点日志显示 SDK 连接成功，但 `/imu/data` 在测量窗口内没有消息。随后停止 `nav_bridge`，单独运行同一份 RobotSDK-0.2.1 arm64 官方 `data` 示例，示例同样显示连接成功但没有 `OnImuData` 回调。因此本轮故障不是 ROS 消息转换或 `ros2 topic hz` 单独造成的，更像是机器人端 IMU 上报配置未生效或服务端传感器订阅状态异常。
 
 代码侧需重点核查：`D1MaxBackend::connect()` 在 `Connect(..., true)` 返回后立即异步调用 `SetImuConfig(100)`，没有等待发送结果，也没有实现 `IControlCallback::OnImuConfig` 确认机器人是否接受配置；官方示例则是在连接完成回调成功后才开始传感器配置。若配置命令在握手完成后的短窗口内被丢弃，节点仍会打印 `connected`，但不会有 IMU 数据。后续修复应采用同步发送或回调确认、记录错误码，并在配置失败时重试。
 
-### 12.3 控制锁恢复后的最终实测
+### 13.3 控制锁恢复后的最终实测
 
 控制锁释放后，使用修复版导航主机二进制单客户端运行，SDK 输出：
 
