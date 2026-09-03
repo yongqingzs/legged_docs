@@ -317,5 +317,99 @@ Number of platforms  0
 请查看，并设计实施方案使得 OpenCL 真正能调用 nx 上的 gpu。
 
 
+## 修改项
+问题:
+1. nav_bridge d1_max 启动后，我发送充电任务:
+```bash
+ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 0}}]}"
+```
+但实际可能由于充电桩故障没有完成充电任务，但这个 service 立马返回 success，这是不对的。应该实际唤起 sdk 的充电任务后，过一段时间确认其在充电状态才可以认为其在充电。退出充电也类似。并且我发现没有在充电中，可以趴下/起立，但可能 cmd_vel 无法接收的情况，我怀疑是充电任务屏蔽的问题。先分析。参考 @/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh/sdk_recharge_task_zh.md、@/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh/sdk_state_zh.md 等
+
+2. 当前 d1 max 实现的进入/退出充电的语义化和 x30 接近吗？请比较 
+
+3. @/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh 这里面是否有一个 gait 步态，能否将其映射为 d1 max 的 l-walk 步态(x30的定义)，请评估
+
+4. d1 nav_bridge 有使用过这个函数吗
+"
+std::error_code Gait(int timeout_ms = 0,
+WriteHandler handler = [](const std::error_code&, std::size_t) {})
+"
+
+5. 当前启动充电任务,我故意让视野里没有充电桩(使得无法完成充电)，但还是返回:
+```
+response:
+rcl_interfaces.srv.SetParameters_Response(results=[rcl_interfaces.msg.SetParametersResult(successful=True, reason='D1 task confirmed running.')])
+```
+评估该问题
+
+6. 你这个实现方式是错误的，不应该 sdk 返回什么你就直接返回什么。对于充电任务，至少调用 sdk 开始充电任务后，通过"确认充电状态处于充电中"，你才能返回结果(如果 sdk 第一次调用就失败，则直接返回失败)。否则你这个 service 返回将没有意义。进行离开充电桩任务也类似，现在无论是否在充电桩上你都直接调用"离开充电桩"，这不是瞎搞吗？和充电相关的都需要确认状态。你不能瞎搞。请评估。
 
 
+7. 我运行在 cat 板卡上运行 nav_bridge，出现:
+```
+(D1M-A) ~ ros2 service call /nav_bridge_node/charge_command \
+  rcl_interfaces/srv/SetParameters \
+  "{parameters: [{name: charge_command, value: {type: 2, integer_value: 0}}]}"
+
+[ERROR] [1788400573.739893010] [rmw_zenoh_cpp]: z_reply_is_ok returned False Reason: Timeout for service '/nav_bridge_node/charge_command'
+```
+但其实已经进入充电。请评估。
+
+
+## cat 板卡调试 nav_bridge
+有三个板卡:
+cat板卡: ssh cat@10.0.40.226，密码: cat
+运动主机(需先连接cat板卡再 ssh): ssh robot@192.168.168.168(密码: bot)
+导航主机(需先连接运动主机再 ssh): ssh robot@192.168.168.100(密码: 1)
+几个板卡上的模块通过 ros2 连通
+
+cat 板卡上调用 service，超过 10s 会报错
+```
+[ERROR] [1788400573.739893010] [rmw_zenoh_cpp]: z_reply_is_ok returned False Reason: Timeout for service '/nav_bridge_node/charge_command
+```
+cat 需要先运行
+如何修改配置
+
+修改文件：
+```
+/home/cat/Workspace/zenoh_ws/router_config.json5
+```
+新增：
+```
+queries_default_timeout: 120000,
+```
+含义为 Zenoh service/query 最长等待 120 秒，覆盖 D1 充电和离桩任务的 30-60 秒执行时间。
+
+已完成：
+
+- 原配置备份：
+```
+/home/cat/Workspace/zenoh_ws/router_config.json5.bak.20260903-104602
+```
+- 停止旧 rmw_zenohd
+- 使用正确 ROS 环境重新启动：
+```
+PID 11989
+/home/cat/Workspace/zenoh_ws/install/rmw_zenoh_cpp/lib/rmw_zenoh_cpp/rmw_zenohd
+```
+- 确认进程使用：
+```
+ZENOH_ROUTER_CONFIG_URI=/home/cat/Workspace/zenoh_ws/router_config.json5
+```
+现在 Cat 上调用充电 service 不会再因 Zenoh 默认 10 秒超时而提前失败，最长可等待 120 秒。
+
+日志中的 timestamp warning 与 service 超时无关，是其他板卡时钟/时间戳偏差问题。
+
+
+### 问题
+cat 主机(ssh cat@10.0.40.226，密码: cat)上运行 zenoh
+```
+ros2 run rmw_zenoh_cpp rmw_zenohd
+```
+显示
+```
+2026-09-03T03:24:13.835206Z ERROR rx-1 ThreadId(07) zenoh::net::routing::dispatcher::pubsub: Error treating timestamp for received Data (incoming timestamp from cdadde95c7cda559e960a02cf5ad29fc exceeding delta 500ms is rejected: 2026-09-03T03:27:02.029631477Z vs. now: 2026-09-03T03:24:13.835202452Z). Replace timestamp: Some(7681144654197164496/132458b6777f9f9976080f2567264e7a)
+```
+什么原因，请评估

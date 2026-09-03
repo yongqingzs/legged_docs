@@ -1062,3 +1062,23 @@ schedule_intervals       保留完整的底层时空轨迹
 5. schedule_intervals 继续保留，作为底层回放和执行数据；关键点和事件作为人类可读、执行器可用的摘要。
 6. coarse_search_factor 只用于路径简化或减少普通直线段的显示点，不能直接作为关键点间隔，也不能替代 footprint 和安全距离检查。
 7. 后续再增加安全等待点约束，确保 CBS 不在窄通道、共享资源或过渡过程内部等待。
+
+
+## planner 输出改进
+@/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/03_homogeneous_shared_charger_benchmark/plan.json 中:
+1. schedule_intervals 我感觉可以不用输出了，没有实际意义
+2. navigation_checkpoints 中 start、task、turn 分别代表什么，为什么有 start 没有 stop
+3. 实际输出给导航参考的任务点和关键点是 navigation_checkpoints
+请分析，先不要修改源码
+
+问题:
+1. traffic_events 表达 CBS 产生的等待，那么 traffic_events 会插入 navigation_checkpoints 中吗？还是说独立的。
+
+完成:
+1. schedule_intervals 从 checkpoints 中移除
+2. navigation_checkpoints 应成为正式导航参考，但需要先修正终点类型、从几何路径而不是重复时间帧提取转弯点，并保留资源/转换边界及冲突等待事件
+
+
+问题:
+1. @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/03_homogeneous_shared_charger_benchmark/plan.json 中 navigation_checkpoints 有大量连续的 turn，这对于任务级规划没有意义，因为这些连续的 turn 可能就代表一个弯道。请分析评估，不要修改源码。
+
