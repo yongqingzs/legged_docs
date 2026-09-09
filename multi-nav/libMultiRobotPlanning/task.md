@@ -1082,3 +1082,146 @@ schedule_intervals       保留完整的底层时空轨迹
 问题:
 1. @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/03_homogeneous_shared_charger_benchmark/plan.json 中 navigation_checkpoints 有大量连续的 turn，这对于任务级规划没有意义，因为这些连续的 turn 可能就代表一个弯道。请分析评估，不要修改源码。
 
+
+## 任务分配问题
+如何理解
+```
+这是“单任务 relocation”的爬山式局部搜索：
+- 只接受评分严格下降的方案；
+- 找不到更好方案时停止；
+- 不保证全局最优；
+- 当前没有实现双任务交换、2-opt 等更大邻域操作。
+```
+
+完成改进方案：
+1. 加入 swap；
+2. 加入路线内 2-opt；
+3. 将固定任务排序改为动态 regret；
+4. 增加 multi-start；
+5. 统一或归一化目标函数。
+并在额外的 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1 配置上完成测试。
+
+
+问题:
+1. normalize 会使多次局部搜索代价暴涨？那么，引入 normalize 是否无必要，或者代价过大？请评估。
+
+2. 参考 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/01_three_corners_middle_corridors.yaml，创建一个"5 种机器人、20 种任务、50 个点位"的配置，场景一致。测试效果如何。
+- 你这 50 个点位全部集中在场景中间两条路径上，我希望是能分布在 4 条路径上(修改 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/04_five_robot_types_50_points.yaml)。并且测试。
+- 生成的 @/home/jazzy/cpp/capability_mission_scenarios/output/bdz1/04_five_robot_types_50_points/plan.json 解决时空冲突了吗？navigation_checkpoints 似乎只有 start、finish、task、turn 等。请评估。
+
+## swap 等特性会大幅增加规划时间
+当前 8 秒在这个配置下是可以解释的，但算法效率确实还有明显优化空间。
+
+主要原因不是：
+```
+单次 A* 在大地图上异常慢
+```
+而是：
+```
+动态 regret
++ relocate
++ swap
++ 2-opt
++ multi-start
+```
+组合后对大量候选路线反复进行完整路线重算。
+
+coarse_search_factor: 4 已经降低了单次 A* 的网格规模；继续单纯增大采样面积未必能解决核心问题。最有效的方向是：
+```
+路径代价矩阵
++ 增量路线代价
++ 候选邻域剪枝
++ 分阶段性能统计
+```
+另外，当前 planning_time 约 8 秒并不意味着算法不可用。对于 50 个任务、5 台异构机器人、4 条走廊和多次启发式优化，作为离线规划时间是可以接受的；但如果目标是实时重规划，就必须优先改造候选评估和缓存结构。
+
+按以下顺序实施：
+1. 增加分阶段计时和调用计数；
+2. 构建静态路径代价矩阵；
+3. 用增量方式计算插入、删除、swap、2-opt；
+4. 对 swap/2-opt 做自适应邻域剪枝；
+5. 为 multi-start 设置严格时间预算；
+6. 使用上一轮结果 warm start；
+7. 必要时并行评估候选。
+
+
+你需要逐一验证你的想法，如果一个改进对结果影响微小，你应该删除清理，防止过多的冗余。不要完成一半/一部分，就停止，并告诉我刚才的修改有问题。你可以参考 @/home/jazzy/cpp/libMultiRobotPlanning、@/home/jazzy/rmf_ws/src/rmf，对你算法改进，优化时间应该有帮助。请完成验证，实现代码。
+
+
+先清理当前实验性改动，回到稳定基线，然后只实现一个核心优化：
+```
+RouteState + 增量边代价
+```
+
+
+问题:
+1. 我将 git 版本回退了(暂存区里是增加了 swap 等优化时)，这次你需要重新审视这些优化。如果有明显拖慢算法运行的(需要在 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/04_five_robot_types_50_points.yaml 和你新增至少 2-3 个复杂多的场景上测试)，评估优化项，使算法更快更好。请完成。
+
+2. 当前的上层任务分配会同时考虑最短路径问题吗？如果这样，能否针对这点进行优化设计，任务分配的前置先不考虑最短路径，后面筛选才考虑，从而加快速度。我的想法是否合理，客观分析，绝不能主观偏向我。一些算法集合: @/home/jazzy/cpp/libMultiRobotPlanning
+
+3. 如何更直白地理解当前算法的搜索过程:
+```
+1. 对候选机器人和每个插入位置创建 RouteState。
+2. RouteState::inserted() 计算插入位置前后的新边。
+3. RouteState::edge() 调用 estimate_distance()。
+4. 目标函数使用路线的 travel ticks 和 service ticks 评价候选。
+```
+
+建议实施，但不是“分配完全不考虑路径”，而是：
+```
+> 低成本空间下界筛选 + 少量候选 A* 精化 + 最终精确路径生成。
+```
+预期收益主要来自减少 A* 调用数；风险是近似筛选损害分配质量。必须通过以下消融验证：
+- K=2/4/8/全量
+- 规划时间
+- 最大负载和总负载
+- A* 调用次数
+- top-K 不可达后的扩展次数
+- 与当前完整候选结果的目标差距
+
+合理的接受标准可以是：A* 调用减少至少 70%，规划时间明显下降，最大负载恶化不超过 1～3%。若达不到这个比例，这套分层筛选就不值得保留。
+
+如果让你完成这个方案验证，达到期望 "A* 调用减少至少 70%，规划时间明显下降，最大负载恶化不超过 1～3%。若达不到这个比例，这套分层筛选就不值得保留"
+```
+低成本空间下界筛选 + 少量候选 A* 精化 + 最终精确路径生成。
+```
+你会如何评估执行方案。
+
+
+问题:
+1. 当前算法运行 @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/05_five_robot_types_60_points.yaml、@/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/06_five_robot_types_80_points.yaml 似乎都无法成功，请评估。
+
+
+方向:
+1. 优化 cbs 的流程
+2. 考虑 @/home/jazzy/cpp/libMultiRobotPlanning/include/libMultiRobotPlanning/ecbs.hpp ecbs 是否更有效
+3. 其他不减弱/稍微减弱结果的方法尝试
+实现验证。
+
+
+说明:
+1. 针对重复冲突、对称分支和约束重复检测设计增量式 CBS
+2. 解决 05 场景的 CBS 高层搜索树
+
+
+说明:
+1. 是否可能，在开始阶段不用 a* 做距离判断，使用欧式距离/曼哈顿距离等做粗略估计，完成粗筛后，再使用 a* 进行精筛。请客观评估可行性。
+```
+./build/capability_mission_planner_cli   /home/cat/cpp/capability_mission_scenarios/configs/bdz1/04_five_robot_types_50_points.yaml   /home/cat/cpp/capability_mission_scenarios/output/bdz1/04_five_robot_types_50_points/
+
+./build/capability_mission_planner_cli   /home/cat/cpp/capability_mission_scenarios/configs/bdz1/05_five_robot_types_60_points.yaml   /home/cat/cpp/capability_mission_scenarios/output/bdz1/05_five_robot_types_60_points/
+
+./build/capability_mission_planner_cli   /home/cat/cpp/capability_mission_scenarios/configs/bdz1/06_five_robot_types_80_points.yaml   /home/cat/cpp/capability_mission_scenarios/output/bdz1/06_five_robot_types_80_points
+```
+
+说明:
+1. 在(cat@10.0.40.226 密码:cat)上运行"/home/cat/cpp/capability_mission_planner/build/capability_mission_planner_cli   /home/cat/cpp/capability_mission_scenarios/configs/bdz1/04_five_robot_types_50_points.yaml   /home/cat/cpp/capability_mission_scenarios/output/bdz1/04_five_robot_types_50_points/"，运行花费
+```
+timing_planning_seconds: 77.1654
+timing_total_seconds: 77.5921
+```
+这是不可接受的，请评估。
+
+2. 给 capability_mission_planner 添加多线程支持(最多 4 线程)，是否对算法效率有帮助。请评估。
+
+

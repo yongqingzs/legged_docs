@@ -193,7 +193,7 @@ ros2 service call /nav_bridge_node/set_gait rcl_interfaces/srv/SetParameters \
 | `STAIR_SOLID` | 6 | 登阶模式 |
 | `STAIR_ACC` | 7 | 登阶模式 |
 | `STAIR45_ACC` | 8 | 登阶模式 |
-| `L_WALK` | 32 | 通用模式 + 低速 |
+| `L_WALK` | 32 | GAIT |
 | `MOUNTAIN` | 33 | 通用模式 + 中速 |
 | `SILENT` | 34 | 通用模式 + 中速 |
 | `L_STAIR` | 36 | 登阶模式 |

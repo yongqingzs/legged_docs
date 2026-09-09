@@ -413,3 +413,55 @@ ros2 run rmw_zenoh_cpp rmw_zenohd
 2026-09-03T03:24:13.835206Z ERROR rx-1 ThreadId(07) zenoh::net::routing::dispatcher::pubsub: Error treating timestamp for received Data (incoming timestamp from cdadde95c7cda559e960a02cf5ad29fc exceeding delta 500ms is rejected: 2026-09-03T03:27:02.029631477Z vs. now: 2026-09-03T03:24:13.835202452Z). Replace timestamp: Some(7681144654197164496/132458b6777f9f9976080f2567264e7a)
 ```
 什么原因，请评估
+
+问题:
+```
+只要 SDK 最近一次任务状态仍是：
+TaskType == RECHARGING 或 UNDOCK
+TaskStatus == STARTING 或 RUNNING
+就会屏蔽非零速度。
+```
+1. 有这么一种情况会导致这种方式出现问题，比如使用 sdk 进入充电，但是使用遥控器退出充电，sdk 状态没有切换，导致 /cmd_vel 不可控，请评估。
+
+因此最简洁且完整的规则应是：
+```
+自主回充执行阶段：
+    屏蔽 /cmd_vel
+实际充电阶段：
+    屏蔽 /cmd_vel
+回充失败或遥控器退出后：
+    根据实时 RobotState 自动解除屏蔽
+```
+
+2. 请将 nav_bridge D1 MAX 的 L_WALK 步态映射替换为 @/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh/sdk_client_api_zh.md 中 Gait 步态(这是一种步态类型，和 gait 的通用指向不同)。并且 D1 MAX 切换状态机(nav_bridge 自己的状态机)时需要打印输出。请评估。
+
+```cpp
+std::error_code Gait(int timeout_ms = 0,
+                     WriteHandler handler = [](const std::error_code&, std::size_t) {})
+```
+
+3. 现在 nav_bridge 是否调用
+```cpp
+std::error_code Gait(int timeout_ms = 0,
+                     WriteHandler handler = [](const std::error_code&, std::size_t) {})
+``` 
+后，再设置 slow 作为 L_WALK 步态？这样可能有些问题，因为 Gait 和通用模式的低、中、高其实是四种不同的模式，L_WALK 调用 GAIT 后不应该调用 SLOW 了。请评估。
+
+
+4. d1 max 接收 /cmd_vel 和 x30 逻辑一致吗？ d1 max 接收 /cmd_vel 是否会产生延迟。
+
+
+问题:
+@/home/jazzy/drive_ws/src/RobotSDK-0.2.1/docs/zh/sdk_client_api_zh.md 中对于 
+```cpp
+std::error_code Move(float left_right, float forward_back, float yaw, 
+                     int timeout_ms = 0,
+                     WriteHandler handler = [](const std::error_code&, std::size_t) {})
+```
+使用百分比表示，那么 D1 MAX 中几个状态机 MOUNTAIN、L_WALK 是怎么进行缩放的或如何处理这个百分比问题的？
+
+1. /cmd_vel 发出的应该是实际速度 m/s，所以应该根据其对应的速度等级进行相应的缩放，而不是使用 MOVE 发出百分比。比如其速度等级是 2，接收 /cmd_vel = 2 m/s 时，应当除 2 再发出。请客观评估。
+
+2. 我刚才说错了， L_WALK→Gait() 的速度上限和 "通用模式+中速" 应当一致。现在在该步态下给予 1 m/s，可能会到 2 m/s。请修复。 
+
+3. D1 MAX 的 MOUNTAIN 模式改为映射到 "通用模式+高速"。
