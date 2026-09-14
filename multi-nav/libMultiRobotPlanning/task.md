@@ -1224,4 +1224,60 @@ timing_total_seconds: 77.5921
 
 2. 给 capability_mission_planner 添加多线程支持(最多 4 线程)，是否对算法效率有帮助。请评估。
 
+3. 当前 capability_mission_planner 是经过几轮改进的:
+- 减少栅格搜索次数
+- 添加地图加载缓存
+- 减少哈希计算开销
+- 修改为ros2节点
+请查看几个改进点是否正确、符合期望。
 
+方案:
+1. capability_mission_planner 接收 ros2 消息的绝对路径 json (json 包含算法各种输入信息)
+2. capability_mission_planner 输出 ros2 消息的也是绝对路径 json, 让对方节点直接去取,减少通信开销
+评估:
+1. 方案合理性
+2. 该 ros2 消息用哪个官方消息,最好复用 SetParameters
+3. 该如何适配
+请评估
+
+执行:
+1. 使用 SetParameters 作为请求接口, 删除当前的 ros2 接口
+2. 接收 ros2 消息的绝对路径 json(需要解析 json), 输出 ros2 消息的也是绝对路径 json
+3. 不要影响其离线模式
+
+问题:
+1. @/home/jazzy/cpp/capability_mission_scenarios/configs/bdz1/04_five_robot_types_50_points.yaml
+```
+tasks:
+  - {id: t01-fire, location: {map_id: bdz1, grid: [300, 1036]}, requirements: [fire], category: fire_suppression, service_seconds: 6, high_priority: true}
+```
+
+## 当前多机协同方案向部分分布式修改
+每个机器人上都部署了多机任务分配算法(capability_mission_planner)，每个机器人将信息上报一个中心的 mqtt 服务器，该服务器会选取一个机器人作为领队，让其执行多机协同算法。该领队上报结果，中心服务器再分配任务给各个机器人(由 @/home/jazzy/task_ws/src/inspection_task_hub 执行)。
+这样是否合理，现在考虑下一步实现计划:
+1. 数据转发仍然使用 mqtt broker
+2. 多机自主选举领队(分布式选举、而不是集中式选举)
+你有什么方案，需要可实现性强、方便落地的方案，请分析
+
+
+### 推荐目标架构：MQTT 骨干上的“租约领队”模式
+机间数据交互：不加 P2P，改用 fleet 广播 topic（成本最低的“分布式数据面”）
+机器人都连同一个 broker，把 fh/device/{sn}/status 这类单点上报改为：
+```
+fleet/state        （每个机器人发布自己的状态，所有人订阅）
+fleet/leader       （领队租约广播，retained）
+fleet/plan         （领队发布分配结果，带 term_id）
+fleet/plan/ack/{sn}（各机器人确认）
+```
+这就实现了“多机直接数据交互”——数据不再经过中心服务器转发。不建议现在做 Wi-Fi mesh / UDP 组播 / DDS discovery：巡检机器人网络环境差，P2P 的发现、NAT、断网重连复杂度极高，而 broker 方案天然具备这些问题。如果未来实测 broker 时延成为瓶颈，再在领队机上起本地 mosquitto，只需改 broker 地址配置。
+
+### 领队选举：租约抢占（Lease + 心跳），不要 Raft
+领队的职责是“拿机队状态快照 → 调规划器 → 发结果”，本质无状态（规划输入是快照而非复制日志），用 Raft/Paxos 属于过度设计。建议协议：
+1. 领队每 1s 向 fleet/leader（retained，QoS1）发心跳：{term_id, robot_sn, expire_at}，租约 TTL 3–5s。
+2. 其他机器人只订阅。心跳超时（如丢 3 个）即触发竞选：向 fleet/leader/candidate 发 {candidate_priority, robot_sn}。
+3. 优先级 = f(电量, 是否具备规划器能力, sn 字典序)，确定性破平，避免选票风暴。最高者优先。
+4. 胜者 term_id + 1 自证领队，广播新租约。
+5. 防脑裂（关键）：所有机器人只认“见过的最大 term_id”的 plan 结果（fencing token）。双领队短暂并存时，旧 term 的结果自动被丢弃。时钟不可信，不要用绝对时间做判断。
+
+### 领队 = “虚拟算法中心”，复用现有协议（最大的落地捷径）
+领队机直接在本地调已有的 /capability_mission_planner/plan service（重量级规划数据不过网络），然后把 plan.json 映射为现有 algorithm/device/{sn}/events 消息发给各跟随者。跟随者侧执行链（TaskHub）零改动——它们只是把“算法中心”从云端换成了领队机。中心服务器的角色退化为：监督、人工干预、兜底领队。

@@ -465,3 +465,9 @@ std::error_code Move(float left_right, float forward_back, float yaw,
 2. 我刚才说错了， L_WALK→Gait() 的速度上限和 "通用模式+中速" 应当一致。现在在该步态下给予 1 m/s，可能会到 2 m/s。请修复。 
 
 3. D1 MAX 的 MOUNTAIN 模式改为映射到 "通用模式+高速"。
+
+
+问题:
+1. D1 MAX 通过 nav_bridge 退出充电会出现 "实际已经退出充电，但是显示退出充电失败"，当前判断进入/退出充电成功是依赖什么，是单纯依靠固定时间判定吗？
+2. D1 MAX 通过 nav_bridge 进行状态机切换，会出现状态机信息一直打印的情况，我只希望状态机在实际切换时打印
+请先评估。
