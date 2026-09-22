@@ -1271,6 +1271,7 @@ fleet/plan/ack/{sn}（各机器人确认）
 ```
 这就实现了“多机直接数据交互”——数据不再经过中心服务器转发。不建议现在做 Wi-Fi mesh / UDP 组播 / DDS discovery：巡检机器人网络环境差，P2P 的发现、NAT、断网重连复杂度极高，而 broker 方案天然具备这些问题。如果未来实测 broker 时延成为瓶颈，再在领队机上起本地 mosquitto，只需改 broker 地址配置。
 
+
 ### 领队选举：租约抢占（Lease + 心跳），不要 Raft
 领队的职责是“拿机队状态快照 → 调规划器 → 发结果”，本质无状态（规划输入是快照而非复制日志），用 Raft/Paxos 属于过度设计。建议协议：
 1. 领队每 1s 向 fleet/leader（retained，QoS1）发心跳：{term_id, robot_sn, expire_at}，租约 TTL 3–5s。
@@ -1279,5 +1280,193 @@ fleet/plan/ack/{sn}（各机器人确认）
 4. 胜者 term_id + 1 自证领队，广播新租约。
 5. 防脑裂（关键）：所有机器人只认“见过的最大 term_id”的 plan 结果（fencing token）。双领队短暂并存时，旧 term 的结果自动被丢弃。时钟不可信，不要用绝对时间做判断。
 
+
 ### 领队 = “虚拟算法中心”，复用现有协议（最大的落地捷径）
 领队机直接在本地调已有的 /capability_mission_planner/plan service（重量级规划数据不过网络），然后把 plan.json 映射为现有 algorithm/device/{sn}/events 消息发给各跟随者。跟随者侧执行链（TaskHub）零改动——它们只是把“算法中心”从云端换成了领队机。中心服务器的角色退化为：监督、人工干预、兜底领队。
+
+
+## 选举方案分析
+这是需求:
+```
+每个机器人上都部署了多机任务分配算法(capability_mission_planner)，每个机器人将信息上报一个中心的 mqtt 服务器，该服务器会选取一个机器人作为领队，让其执行多机协同算法。该领队上报结果，中心服务器再分配任务给各个机器人(由 @/home/jazzy/task_ws/src/inspection_task_hub 执行)。
+这样是否合理，现在考虑下一步实现计划:
+1. 数据转发仍然使用 mqtt broker
+2. 多机自主选举领队(分布式选举、而不是集中式选举)
+你有什么方案，需要可实现性强、方便落地的方案，请分析
+```
+你会如何选用分布式选举算法并适配方案，并且解决"选举过程中实际应当分配 leader 的机器人离线，它认为自己是 leader 后回归，产生两个 leader "等常见问题。
+并且查看 @/home/jazzy/agent_ws/src/legged_docs/multi-nav/libMultiRobotPlanning/fleet_leader_election.md 设计的原方案是否合理，是否具备可行性，符合你的要求。
+
+问题:
+1. 先不要管 mqtt 和通信交互，实现这套分布式选举本身(放在 @/home/jazzy/py )，并设置不同异常情况验证这套算法。
+2. @/home/jazzy/py/fleet_leader_election 能否增加可交互演示，例如: 
+- 一群机器人，我手动选择某个机器人掉线(选举时或其他时候掉线)
+- 一群机器人如何触发选举
+等等各种情况，从而让我有更直观的认识。
+
+### fleet_leader_election 问题
+1. fleet_leader_election 是依靠什么规则选举？
+2. 在 demo_server 演示中，为什么一个节点 Ember (非 leader)暂停进程后，再恢复，Ember 会变成新 leader？
+3. 在 demo_server 演示中，隔离网络和模拟掉线有什么区别？
+4. 在 demo_server 演示中，每个节点都运行了 election 选举模块吗？
+
+
+1. fleet_leader_election 当前使用 Raft 风格的多数派选举，不按固定优先级选 leader。
+
+规则是：
+- follower 在 election_timeout 内收不到 leader 的 Heartbeat，就进入 candidate。
+- candidate 将 term + 1，持久化 term/voted_for，先投自己，再向全部 peer 请求投票。
+- 每个节点在同一 term 只能投一票。
+- 获得多数票，即 floor(N/2)+1，才成为 leader。
+- 收到更高 term 的请求或心跳，立刻降级为 follower。
+- leader 周期发心跳，并且必须持续获得多数节点 ACK；否则失去提交计划的 FencingToken。
+
+演示初始时通常是 Aster 当选，只是因为 demo 为节点故意设置了错开的超时：Aster 最短、Beryl 次之、Ember 较晚，/home/jazzy/py/fleet_leader_election/demo_server.py:42。真实部署应使用随机超时抖动，而非把节点名当优先级。
+
+2. 你观察到的 Ember 恢复后成为 leader，是当前原型暴露出的一个真实协议缺口，不是 Ember 被固定指定为 leader。
+
+复现链路是：
+```
+Aster: term=1 leader
+Ember 暂停，收不到心跳，自己的 election_deadline 已经过期
+模拟时钟继续推进
+Ember 恢复，恰好在下一次 Aster 心跳前执行 tick
+Ember 立刻发起 term=2 竞选
+其他节点看到 term=2 > term=1，按规则先放弃 Aster，再给 Ember 投票
+Ember 获得多数票，成为 term=2 leader
+```
+代码对应 /home/jazzy/py/fleet_leader_election/fleet_election/election.py:92 的超时即竞选，以及 /home/jazzy/py/fleet_leader_election/fleet_election/election.py:132 的“更高 term 先降级再投票”。
+
+这不会造成错误的双 leader 提交，因为旧 leader 的多数派授权会失效，任务侧 fencing token 也会拒绝旧 term；但会造成不必要的 leader抖动。
+
+生产版本应在正式 RequestVote 前增加 PreVote：
+- Ember 恢复先询问多数节点“若我发起下一 term，你会投我吗？”
+- Aster 健康时，其他 follower 最近收到了 Aster 心跳，拒绝 PreVote。
+- Ember 不递增 term，也不会打断当前 Aster。
+- 只有多数节点都认为 leader 已失联，才进入正式投票。
+
+同时，恢复节点应有一个观察期，先接收心跳再允许发起竞选。
+
+3. 演示中两者的区别：
+
+| 操作   | 节点是否执行 tick | 是否收发消息       | 恢复方式    | 状态保留                      |
+| ---- | ----------- | ------------ | ------- | ------------------------- |
+| 模拟掉线 | 否           | 否            | 新建节点实例  | 仅持久化 `term` / `voted_for` |
+| 隔离网络 | 是           | 与其他节点的消息全部丢弃 | 恢复网络连接  | 内存状态完整保留                  |
+| 暂停进程 | 否           | 否            | 原进程继续运行 | 内存状态完整保留                  |
+
+
+“模拟掉线”模拟断电、进程死亡或机器人彻底离线；恢复时 boot_id 改变。/home/jazzy/py/fleet_leader_election/demo_server.py:103
+
+“隔离网络”模拟机器人仍在运行，但无线链路、交换机路径或 broker 路径异常。节点仍会自行推进任期、尝试竞选，隔离的旧 leader 会因拿
+不到多数 ACK 而失去授权。/home/jazzy/py/fleet_leader_election/fleet_election/simulation.py:65
+
+4. 是。每个逻辑机器人都各自运行一个 ElectionNode，持有独立的：
+
+- term
+- voted_for
+- role
+- election timeout
+- leader ACK 视图
+- 本地持久化存储
+
+demo 为了易于观察，把多台“逻辑机器人”放在一个 Python 进程里，由 InMemoryNetwork 代替真实网络；/home/jazzy/py/fleet_leader_election/demo_server.py:42 会为每个节点创建一个独立 ElectionNode。真机部署时，每台机器人各运行一个 coordinator/election 进程，消息传输层再替换为 MQTT。
+
+
+问题:
+1. 这段的逻辑我怎么感觉有些怪呢？ 那么除了掉线的 leader 外，其余 follower 都会成为 candidate，并再投票完成前就将自己本地的 term + 1。这样不会出现 follower 本身掉线了，自己的 term + 1，并自己成为新的 leader(还是说只有获得多数票才可以成为 leader)? 
+```
+- follower 在 election_timeout 内收不到 leader 的 Heartbeat，就进入 candidate。
+- candidate 将 term + 1，持久化 term/voted_for，先投自己，再向全部 peer 请求投票。
+```
+
+## fleet_leader_election 更改后分析
+1. 对于 fleet_leader_election: 一个 term=1 的 leader A 掉线后，fleet 选出新的 leader B. 原 leader A 回来，是如何更新自己的 term 的？请讲解.
+
+A 恢复时不会主动猜测新 term，而是通过集群消息学习。
+```
+A 原先: term=1, leader=A
+A 掉线
+B 获多数票: term=2, leader=B
+A 恢复: 从本地持久化读到 term=1
+A 先进入恢复观察期
+B 发来 Heartbeat(term=2, leader=B)
+A 发现 2 > 1
+A 将本地 term 更新并持久化为 2，清除 voted_for，降为 follower
+A 记录当前 leader=B
+```
+代码在 /home/jazzy/py/fleet_leader_election/fleet_election/election.py:221：
+```
+if message.term > self.term:
+self._adopt_higher_term(message.term, now)
+
+_adopt_higher_term() 做三件事：
+
+self.term = term
+self.voted_for = None
+self.storage.save(DurableElectionState(self.term, self.voted_for))
+self._step_down(now)
+```
+之后同一条 heartbeat 会设置：
+```
+self.leader_id = message.leader_id  # B
+```
+所以 A 的旧 term=1 不会恢复成 leader 身份。它看到 B 的 term=2 后，持久化更新为 term=2，成为 B 的 follower。
+
+恢复观察期的作用是：A 刚回来时先只接收消息，不马上发起竞选。这样健康的 B 有机会先用 heartbeat 告诉 A 当前 term，避免 A 用旧状态干扰现任 leader。
+
+
+### 对于 @/home/jazzy/py/fleet_leader_election/demo_server.py，同时竞选、提交计划、重放旧计划分别是什么用途？
+
+1. 同时竞选
+
+人为让所有在线节点的选举截止时间同时到期，制造“多个节点同时发起 PreVote/竞选”的场景。
+
+用途是观察：
+
+- 同一轮中每个节点只能投一票；
+- 可能出现 split vote，没有节点立刻成为 leader；
+- 节点经过不同的下一轮超时后，最终某节点获得多数票并收敛。
+
+它用于理解选举过程和随机/错峰 election timeout 为什么必要。
+
+2. 提交计划
+
+模拟当前 leader 向下游任务系统提交一次任务分配计划。
+
+用途是验证 leader 不只是 role == leader，还必须持有有效的多数派授权：
+
+leader
++ 当前仍取得多数节点 Heartbeat ACK
++ 未过期的 FencingToken
+= 可以提交计划
+
+服务端通过 commit_current_plan() (/home/jazzy/py/fleet_leader_election/demo_server.py:150) 从 leader 取得 token，再交给
+FencedPlanGate。例如 A(term=1) 提交后，任务侧记录已接受最高 term 为 1。
+
+3. 重放旧计划
+
+模拟已经失效的旧 leader，或网络延迟导致的旧计划，在新 leader 已接任后才送到任务侧。
+
+正确的体验顺序是：
+
+A(term=1) 是 leader
+→ 提交计划
+→ A 掉线
+→ B(term=2) 接任
+→ B 提交计划
+→ 重放旧计划
+
+最后一步重放的是 A 的 term=1 token；任务栅栏已经接受 B 的 term=2，因此会拒绝 A 的旧计划：
+
+term 1 < 已接受的 term 2
+→ 拒绝
+
+这验证的是 fencing 的核心安全性：即使 A 因暂停、网络延迟或恢复滞后仍认为自己能工作，旧任期的计划也不能覆盖新 leader 的计划。
+
+注意：若只执行一次“提交计划”，随后立即“重放旧计划”，该 token 仍是当前最高 term，演示会显示“错误接受”。这是刻意提示该计划尚未过期；必须在新 leader 提交更高 term 计划后，才能观察到“正确拒绝”。
+
+
+问题:
+1. fleet_leader_election 是如何选举出领队的，依据什么标准？
+2. 我发现当前这种选举方式似乎无法做到数据中转(mqtt broker)在 leader 之间跳转，如何做到分布式选举，mqtt broker 也流转到 leader 上，请分析。
