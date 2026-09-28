@@ -549,3 +549,93 @@ curl -X POST 'http://192.168.168.100:25682/algorithm/execute' \
 并在 @/home/jazzy/drive_ws/src/nav_bridge/d1_max/zenoh 完成相应的备份和说明
 
 D1M-B 上使用的 DOMAIN_ID 以 ~/.zshrc 为准
+
+
+问题:
+D1M-B 板卡运行 "/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation" 显示错误
+- D1M-B 主机: ssh cat@10.0.40.195(密码: cat)(但注意是裸卡，没有搭载传感器)
+请检查这个错误由什么造成
+
+
+## D1M-B: cat@47.99.202.196(密码: cat)
+D1M-B 板卡
+```
+/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation
+```
+上一直报:
+```
+9月 23 20:40:51 ZN run_navigation.sh[44255]: [navigation_supervisor-1] 2026-09-23T12:40:51.596301Z ERROR net-12 ThreadId(34) zenoh::net::runtime::orchestrator: Unable to send Hello(HelloProto { version: 9, whatami: Peer, zid: 2de9f221d90513b6f9cfeccd659c4b15, locators: [tcp/[fe80::7d4b:3140:82b5:409a]:46563, tcp/[fe80::af0:b9c5:3ac:f134]:46563, tcp/192.168.168.111:46563, tcp/10.0.40.195:46563] }) to 172.30.202.186:51141: Network is unreachable (os error 101)
+```
+请先分析原因，不要修改源码/配置等
+
+
+## 云台问题
+当前云台节点可通过 ros2 消息控制哪些动作(转动、拍照等)？请进行统计。并新建 md 写入 @/home/jazzy/agent_ws/src/legged_docs/tools/inspection_task_hub
+
+D1M-B 板卡上已经部署云台节点且连接真实云台(/home/cat/Workspace/task_ws/)，请进行修改测试(先在本地修改，再远程同步)，验证你的修改是否可以有效降低资源占用且不影响其功能。如果没有真正有效降低资源或者影响功能(需要逐一确认)，请回退修改。
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+问题:
+1. 我在 D1M-B (/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs system 这个服务可以控制云台节点)上看到:
+```
+9月 28 13:11:28 ZN run_inspection_system.sh[62282]: [sensor_gimbal_node-2] [1790572288.046937395] [WARN] [gimbal_stub_node]: 海康设备登录失败: NET_DVR_Login_V40 failed, error code: 7
+```
+请排查问题在哪里。
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+
+## 全局规划器贴边策略、导航 service
+你不能只通过本地判断，D1M-B 上已经部署了整套导航: /home/cat/Workspace/algor_ws/src(由 /home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation 统一管理)，然后我在栅格地图建立后已经给盖板都画出了可通行区域，你觉得贴边我该如何处理: 1. 修改算法参数 2. 更换全局算法
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+
+/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation 可以通过一个 ros2 service 下发地图，可以通过另一个 service 启动定位和导航，请分析说明具体是哪些 service，该如何用？
+
+
+一次启动定位和完整导航，当前地图 VVY4GdI 可这样传：
+```
+ros2 service call /navigation_bringup/start rcl_interfaces/srv/SetParameters \
+"{parameters: [
+  {name: 'mode', value: {type: 4, string_value: 'nav'}},
+  {name: 'slam.prior_dir', value: {type: 4, string_value: '/home/cat/Workspace/Maps/VVY4GdI'}},
+  {name: 'global_planner.initial_map', value: {type: 4, string_value: 'map_000'}}
+]}"
+```
+这里 slam.prior_dir 是地图目录，global_planner.initial_map 是目录中的地图名，不带 .yaml；不传 global_planner.multi_map_dir 时，它会沿用 slam.prior_dir。返回的 results 中最后一项表示启动及就绪检查的结果，检查其 successful 和 reason。
+
+
+我当前位于 zju2-3楼 (也就是 D1M-B 上的 /home/cat/Workspace/Maps/VVY4GdI)，我希望验证不同的全局规划器的效果，能否在 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts 新建脚本，可以输入指定地图和起/终点，测试不同全局规划插件的效果，说明如下:
+
+| 插件名称 | 描述 | 支持的机器人类型 |
+| --- | --- | --- |
+| `nav2_navfn_planner::NavfnPlanner` | 基于A*或Dijkstra搜索扩展的导航函数 | 差速、全向、腿式 |
+| `nav2_smac_planner::SmacPlannerHybrid` | 高度优化、完全可重构的Hybrid-A*实现，支持Dubin和Reeds-Shepp模型 | 差速、全向、阿克曼、腿式 |
+| `nav2_smac_planner::SmacPlannerLattice` | 高度优化、完全可重构的State Lattice实现，支持可配置的最小控制集合 | 差速、全向、阿克曼、腿式 |
+| `nav2_smac_planner::SmacPlanner2D` | 高度优化、完全可重构的grid-based A*实现，支持8邻域搜索模型 | 差速、全向、腿式 |
+| `nav2_theta_star_planner::ThetaStarPlanner` | 高度优化的Theta*实现 | 差速、全向 |
+
+如何更换全局规划器:
+```
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_voronoi_planner/VoronoiPlanner" # 规划器插件名称
+      allow_unknown: true                           # 允许穿越未知区域
+      publish_voronoi_grid: true                    # 发布Voronoi栅格话题（/voronoi_grid）
+      recompute_on_costmap_update: true             # 地图更新时重计算Voronoi
+      precompute_voronoi: true                      # 插件启动时预计算Voronoi
+      debug: false                                  # 打印调试信息
+      costmap_topic: "/global_costmap/costmap_raw"  # 订阅代价地图话题
+```
+请新建脚本测试，先不要影响 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2 本身的功能
+
+
+问题:
+1. 请说明 `navfn`、`smac2d`、`hybrid`、`lattice`、`theta` 现有几个全局规划器的特点(直白地说)，他们规划的路径有什么特点，添加到 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts/README.md
+
+2. D1M-B 上的真实全局规划参数我是应该修改 multi_map_nav_ros2 还是 inspection_bringup 下的 config，具体是哪个 config 文件，new_local.yaml 和 normal.yaml 分别是什么用途？
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+3. @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/params/new_local.yaml 这些参数分别表示什么和如何根据实际调整，写入 /home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts/README.md
