@@ -12,6 +12,8 @@
 mkdir -p /tmp/VVY4GdI
 scp -P 20004 cat@47.99.202.196:/home/cat/Workspace/Maps/VVY4GdI/map_000.yaml /tmp/VVY4GdI/
 scp -P 20004 cat@47.99.202.196:/home/cat/Workspace/Maps/VVY4GdI/map_000.png /tmp/VVY4GdI/
+
+scp -P 20004 cat@47.99.202.196:/home/cat/Workspace/Maps/VW7En2y.zip /home/jazzy/nav_t_ws/src/multi_map_nav_ros2/tmp
 ```
 
 ## 运行示例
@@ -30,9 +32,45 @@ python3 scripts/compare_global_planners.py \
 python3 scripts/compare_global_planners.py \
   --map /home/jazzy/nav_t_ws/src/multi_map_nav_ros2/tmp/VVY4GdI/map_000.yaml \
   --start 95,85 --goal 215,125 --pixels \
-  --planners smac2d,theta \
+  --planners smac2d,hybrid \
   --output /home/jazzy/nav_t_ws/src/multi_map_nav_ros2/tmp/VVY4GdI/planner-comparison \
   --allow-unknown false
+
+# 例子2
+python3 scripts/compare_global_planners.py \
+  --map tmp/VW7En2y/map_000_compare.yaml \
+  --start 120,1260,1.57079632679 \
+  --goal 1200,200,1.57079632679 \
+  --pixels \
+  --planners smac2d,hybrid \
+  --allow-unknown false \
+  --output tmp/VW7En2y/planner-comparison \
+  --timeout 60
+
+# 例子2: hybrid 
+python3 scripts/compare_global_planners.py \
+  --map tmp/VW7En2y/map_000_compare.yaml \
+  --start 970,680,0 \
+  --goal 1430,390,1.57079632679 \
+  --pixels \
+  --planners smac2d,hybrid \
+  --allow-unknown false \
+  --output tmp/VW7En2y/planner-comparison-turn \
+  --timeout 60
+
+
+```
+
+```bash
+python3 scripts/compare_global_planners.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --start 1430,390,1.57079632679 \
+  --goal 813,1015,0 \
+  --pixels \
+  --planners smac2d \
+  --allow-unknown false \
+  --output tmp/VW7En2y/planner-comparison1 \
+  --timeout 60
 ```
 
 示例中的 `(90,81)` 和 `(210,123)` 是图片左上角为原点的像素坐标，仅用于演示脚本运行；实际比较时请换成目标场景的起终点。省略 `--pixels` 时，坐标使用 ROS `map` 坐标系下的米，格式为 `x,y` 或 `x,y,yaw`，其中 yaw 单位为弧度。负坐标建议写成 `--start=-9.95,5.05`。

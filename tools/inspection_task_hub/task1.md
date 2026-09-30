@@ -639,3 +639,76 @@ planner_server:
 - D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
 
 3. @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/params/new_local.yaml 这些参数分别表示什么和如何根据实际调整，写入 /home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts/README.md
+
+4. 我将 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts/README.md 转移到 @/home/jazzy/agent_ws/src/legged_docs/nav-real/multi_map_nav_ros2/compare_global_planners.md。另外，我想在 D1M-B 上实验不同的全局规划器，我该修改哪个配置文件，如何修改？比如使用 theta? 并且如何确定修改生效。
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+
+## rmw_zenoh 资源占用
+D1M-B 上运行 inspection_bringup 下的 system 相关模块(已运行)，
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+- nx 主机(需通过 D1M-B 主机跳转): ssh robot@192.168.168.100(密码: 1)
+- D1M-B 和 nx 是 rmw_zenoh 中间件，已经连通
+我想将 system (云台节点、各传感器节点、inspection) 相关模块放入 nx 主机上运行，你评估一下可行性。但先不要修改系统服务(因为 nx 是通过 robot-launch 设置系统服务)
+
+
+## 0930 10.30 左右定位发散
+D1M-B 30 分钟前出现定位发散(刚才已经重新定位上)，请排查是什么原因
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+- 定位和导航都是通过 "/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation" 控制
+- 定位信息 "ros2 topic echo /odometry_horizon | grep posi -A3"
+
+
+故障过程有明确的时间线：
+- **10:27:15**，`localPlanner` 和 `pathFollower` 开始报告里程计不可用或过期。
+- **10:27:18**，`laser_mapping` 报告点云与地图的残差 RMS 为 **0\.206 m**，超过配置的 **0\.2 m** 上限，状态由 `TRACKING` 进入 `LOST`。
+- 随后激光更新持续被拒绝，旧进程日志中共有 **2163 条** `LIDAR UPDATE REJECTED`。到 **10:41**，规划器看到的位置已偏至约 `(91271, 129724)`，明显不是真实位置。
+- 配置启用了 RTK 兜底，但日志显示未建立 RTK 到地图的坐标对齐；现场 `/rtk_pvh_g90` **没有发布者**，所以失去激光跟踪后无法由 RTK 接管。
+- 导航服务后来重启。当前定位状态是 `TRACKING`，`/odometry_horizon` 的位置约为 `(32.65, 81.26)`。
+
+
+### 原因1
+继续追查后，**10:27:18 的 RMS 0.206 m 是触发 `LOST` 的直接条件，但更早的异常是疑似 LiDAR 数据断流**。
+
+Zenoh 日志中，原本稳定约 10 Hz 的远端消息流从 **10:27:14.567 到 10:27:18.594** 没有到达板卡，间隔约 **4\.03 秒**；约 200 Hz 的另一消息流同期持续正常。当前 ROS 话题频率分别是 `/lidar/airy` 约 10 Hz、IMU 约 190–200 Hz，因此这强烈指向 LiDAR 输入链路停顿，但日志里的 Zenoh 发送端 ID 还不能严格对应到具体话题。
+
+这与后续时间线吻合：导航模块从 **10:27:15.12** 起因超过 0.5 秒未收到有效里程计而停车；10 Hz 消息流恢复后约 0.27 秒，`laser_mapping` 处理首帧，点云匹配残差 **0\.206 m \> 0.2 m**，拒绝更新并进入 `LOST`。约 14 秒的跨机时钟偏差在事前事后都存在，现场导航配置也关闭了 header 年龄检查，不能把它认定为这次突发故障的原因。
+
+目前能定位到的上游故障范围是**板卡接收 LiDAR 的链路**。缺少事发点云录包和传感器端日志，尚无法区分是雷达采集、`cloud_merge` 发布，还是该话题的传输中断；也无法仅凭日志证明 4 秒断流一定造成了那 6 mm 的超限。建议下一步从传感器端核查 **10:27:14–18** 的采集与 `cloud_merge` 日志，并为 LiDAR 接收间隔、IMU 接收间隔及每帧残差增加持久化记录。此次检查未修改或重启任何服务。
+
+
+### 输入2
+刚才 D1M-B 又出现定位发散，请继续分析
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+- nx 主机(需通过 D1M-B 主机跳转): ssh robot@192.168.168.100(密码: 1)
+lidar 消息:
+```
+/front_lidar
+/lidar/airy
+/rear_lidar
+```
+/front_lidar、/rear_lidar 是 nx 上原始点云消息，/lidar/airy 是 nx 上 cloud_merge 合并后的点云消息(实际使用)
+
+
+这次发散始于 **11:19:41（北京时间）**&#65292;与上次 10:27 的长时间点云断流不同。证据更指向 **nx 到 D1M-B 的消息传输或接收侧短暂积压**，但目前不能确定卡在网络、Zenoh 路由器还是 D1M-B 调度。
+
+- **11:19:41.20–41.82**：D1M-B 收到的约 10 Hz 消息流间隔 **0\.62 秒**；约 200 Hz 流也间隔 **0\.47 秒**，两路几乎同时在 41.82 恢复。发送端时间戳仍连续递增，说明消息更像是生成后延迟到达，而非 nx 停止生成。
+- **11:19:41.76**：导航因里程计超过 0.5 秒未更新而报 stale。**11:19:42.18**：定位处理后续点云，残差 **0\.211 m** 超过 **0\.2 m** 门槛，进入 `LOST`。短暂积压与失效时间吻合，但没有事发点云，不能证明它是残差升高的唯一原因。
+- nx 上 `/front_lidar`、`/rear_lidar`、`/lidar/airy` 目前均约 **10 Hz**；事发时的节点日志没有逐帧记录，双方也未找到该时段录包。11:24 重定位后，当前进程尚无新的点云拒绝记录。
+
+另有一个需要处理的持续性问题：两机时钟实测相差约 **15 秒**，导致 D1M-B 的 Zenoh 对收到的时间戳持续报错并替换；路由器当前约占 **38% CPU**。它是否造成这次积压尚无证据，不能直接定为根因。下一步应先核对两机的实际 NTP 时间源，并在 nx 发布端、D1M-B 接收端分别记录三路点云和 IMU 的逐帧时间与到达间隔，才能定位积压发生在哪一段。此次仅做只读检查，未改配置或重启服务。
+
+
+问题:
+1. 能否将 D1M-B 上的定位模块资源占用优先级提升至最高，而云台节点的优先级下降？你觉得是否合适，如何实现？
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+2. 请修改云台节点的线程优先级，比导航、定位、zenoh等的都要低，先本地 @/home/jazzy/task_ws/src/sensor_gimbal 修改，再在 D1M-B 上验证是否成功
+- 通过 /home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh restart system 控制 system 的整体启停
+
+
+问题:
+我本地是有代理的(7897 端口，本地运行 clash-verge，clash-verge 开了局域网连接允许，你现在容器里，但可以访问端口)，可以访问 google(外网)，但是我的端侧板卡 D1M-B 没有代理(其有物联网的 5g 卡，连接公网)，是否有办法将我本地的代理转发给 D1M-B 用，使其能够访问 google(外网)
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
+将你的方法和如何操作写入 @/home/jazzy/agent_ws/src/legged_docs/tools/inspection_task_hub 下新的 md，让我自己可以操作
