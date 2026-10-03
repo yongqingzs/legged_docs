@@ -706,9 +706,239 @@ lidar 消息:
 2. 请修改云台节点的线程优先级，比导航、定位、zenoh等的都要低，先本地 @/home/jazzy/task_ws/src/sensor_gimbal 修改，再在 D1M-B 上验证是否成功
 - 通过 /home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh restart system 控制 system 的整体启停
 
+3. zenoh 的优先级你觉得应该设置成多少？当前 0 是否合适(导航、定位等是 -10)。请分析。
+
+好的，修改 D1M-B inspection-zenoh.service 的优先级
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+
 
 问题:
 我本地是有代理的(7897 端口，本地运行 clash-verge，clash-verge 开了局域网连接允许，你现在容器里，但可以访问端口)，可以访问 google(外网)，但是我的端侧板卡 D1M-B 没有代理(其有物联网的 5g 卡，连接公网)，是否有办法将我本地的代理转发给 D1M-B 用，使其能够访问 google(外网)
 - D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
 
 将你的方法和如何操作写入 @/home/jazzy/agent_ws/src/legged_docs/tools/inspection_task_hub 下新的 md，让我自己可以操作
+
+
+## map_000.yaml 的含义
+文件位置：tmp/VW7En2y/map\_000.yaml
+
+### 参数含义
+
+| 参数 | 当前值 | 含义 |
+|---|---:|---|
+| `image` | `map_000.png` | 栅格地图图像，相对于 YAML 文件所在目录 |
+| `resolution` | `0.1` | 每个像素代表 `0.1 m` |
+| `origin` | `[-6.6, -11.7, 0]` | 图像左下角在地图坐标系中的位置和旋转角 |
+| `negate` | `0` | 不反转黑白含义，黑色更接近障碍，白色更接近可通行 |
+| `occupied_thresh` | `1` | 占用阈值 |
+| `free_thresh` | `0` | 空闲阈值 |
+| `mode` | `scale` | 灰度值按比例转换成 `0~100` 的占用代价 |
+
+对应 PNG 尺寸为：
+
+```
+宽度：1564 像素
+高度：1472 像素
+```
+
+因此地图物理范围约为：
+
+```
+X: -6.6  到 149.8 m
+Y: -11.7 到 135.5 m
+```
+
+`origin` 是地图图像左下角的位置，不是地图中心，也不是机器人当前位置。
+
+### 像素坐标和地图坐标
+
+PNG 像素坐标通常是：
+
+```
+左上角：(0, 0)
+向右：像素列增加
+向下：像素行增加
+```
+
+ROS 地图坐标是：
+
+```
+左下角为参考
+X 向右
+Y 向上
+```
+
+当前地图的 `origin[2] = 0`，所以转换公式为：
+
+```
+x = -6.6 + (col + 0.5) × 0.1
+y = -11.7 + (1472 - row - 0.5) × 0.1
+```
+
+其中 `+0.5` 表示取像素中心。
+
+反向转换为：
+
+```
+col = floor((x + 6.6) / 0.1)
+row = 1472 - 1 - floor((y + 11.7) / 0.1)
+```
+
+例如你之前使用的像素点：
+
+```
+start: 1430,390
+goal:  813,1015
+```
+
+对应地图坐标约为：
+
+```
+start = (136.45, 96.45)
+goal  = (74.75, 33.95)
+```
+
+这也是 `compare_global_planners.py --pixels` 使用的转换方式。
+
+如果 `origin[2]` 不为零，则还要先进行旋转：
+
+```
+local_x = cos(yaw) × (x - origin_x) + sin(yaw) × (y - origin_y)
+local_y = -sin(yaw) × (x - origin_x) + cos(yaw) × (y - origin_y)
+```
+
+### 与点云地图坐标的对应关系
+
+首先要确认点云的 `header.frame_id`。
+
+#### 点云已经在 `map_000` 坐标系
+
+可以直接使用上面的公式：
+
+```
+点云 x,y → map_000 坐标 → PNG 像素
+```
+
+例如点云中的点：
+
+```
+(x, y) = (10.0, 5.0)
+```
+
+转换为：
+
+```
+col = floor((10.0 + 6.6) / 0.1) = 166
+row = 1472 - 1 - floor((5.0 + 11.7) / 0.1) = 1304
+```
+
+#### 点云在 `world` 或 ROOT 坐标系
+
+当前目录的：
+
+```
+map_relations.csv
+```
+
+内容是：
+
+```
+ROOT,map_000,0,0
+```
+
+所以当前 `map_000` 的 ROOT/world 偏移为：
+
+```
+T_ROOT_map_000 = (0, 0)
+```
+
+因此当前地图中，`world` 和 `map_000` 的 XY 数值相同，可以直接使用转换公式。
+
+多地图情况下则是：
+
+```
+world_xy = local_xy + T_ROOT_map
+local_xy = world_xy - T_ROOT_map
+```
+
+注意：
+
+```
+T_ROOT_map
+```
+
+和 YAML 中的：
+
+```
+origin: [-6.6, -11.7, 0]
+```
+
+不是同一个概念。
+
+- `origin`：PNG 左下角在该地图坐标系中的位置；
+- `T_ROOT_map`：整张局部地图坐标系相对于 ROOT/world 的平移。
+
+### 当前 PNG 的透明区域
+
+这个 PNG 是 RGBA 图像，其中存在大量：
+
+```
+(0, 0, 0, 0)
+```
+
+也就是透明黑色。
+
+Nav2 对透明像素的处理是：
+
+```
+alpha < 255 → UNKNOWN
+```
+
+因此需要区分：
+
+```
+黑色且不透明 (0,0,0,255) → 障碍
+黑色但透明   (0,0,0,0)   → 未知区域
+白色且不透明 (255,255,255,255) → 空闲
+```
+
+这点很重要：如果电子围栏画成了透明黑线，它不会被当成硬障碍，某些规划器可能允许穿过。电子围栏应确保是**不透明黑色**，并在 `/map` 或 `/global_costmap/costmap` 中显示为占用区域。
+
+当前系统中可以用以下方式核对坐标和地图：
+
+```
+ros2 topic echo --once /map
+ros2 topic echo --once /odometry_horizon
+ros2 topic echo --once /odometry_multi_maps
+```
+
+重点检查：
+
+```
+/map.info.origin
+/map.info.resolution
+/map.info.width
+/map.info.height
+消息的 header.frame_id
+```
+
+当地图加载成功后，`/map` 的 origin、分辨率和尺寸应与该 YAML 及 PNG 一致。
+
+
+## local_planner 横向移动问题
+我发现机器狗实际跟踪 local_planner 的路径，会经常产生横向速度/移动，对于四足机器狗是合理的，但对于轮足机器狗而言更希望利用航向角。我更希望利用航向角，但不是说不要横向速度(或者说生成速度里倾向航向角，而不是横向速度)，你有什么建议和思路? 
+
+这个不是为了盖板设计的，因为死胡同必须原地调头。而是说同样调整横向位置，更倾向使用航向角，而不是横向速度，但是真正需要横向速度时也不是不能用(尤其是紧急避障)。
+
+问题:
+D1M-B 上当前"/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manage_inspection_services.sh logs navigation"使用的是 local_planner/config 下的哪个配置文件；
+我目前没有将本地代码和 D1M-B 同步；
+这个配置文件现在是被 inspection_bringup 控制吗
+- D1M-B: ssh cat@47.99.202.196 -p 20004(密码: cat)
+- nx 主机(需通过 D1M-B 主机跳转): ssh robot@192.168.168.100(密码: 1)
+
+
+问题:
+1. 当前改进后的 local_planner 是以什么方式倾向航向角的，"tracking_mode: "turn_preferred""
+2. nav2 自带的几种局部规划器分别有哪些，是基于什么理念设计的，针对什么类型的机器人
+3. @/home/jazzy/nav_t_ws/src/local_planner/scripts/test_tracking_on_map.py 这个仿真显示并不直观，能否增加 gif 的形式支持，并新增动态障碍(体积合适，至少包含迎面、横向穿行等常见情况)
