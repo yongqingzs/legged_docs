@@ -12,27 +12,82 @@ GIF 默认 8 帧/秒、2 倍速，最后一帧停留 1.5 秒再循环；某模�
 这条路线是仿真输入的直线，不是 Smac2D 规划结果；避障路线由真实 `localPlanner` 生成。
 所有偏移和速度均在世界坐标系中定义，和机器人的转向无关。
 
-## 动态障碍参数怎么改
+## 用 YAML 修改机器人和障碍
 
-动态障碍当前集中定义在源码
-[`test_tracking_on_map.py`](/home/jazzy/nav_t_ws/src/local_planner/scripts/test_tracking_on_map.py:149)
-的 `definitions` 字典中。每一项的格式是：
+场景输入已经从 Python 提取到
+[`scripts/tracking_scenarios.yaml`](/home/jazzy/nav_t_ws/src/local_planner/scripts/tracking_scenarios.yaml)。
+脚本默认读取它，也可以用 `--scenario-config` 指定另一份 YAML。修改 YAML 后不需要重新编译。
+每次运行还会把实际使用的文件复制到输出目录的 `scenario-config.yaml`。
 
-```python
-"场景名称": (
-    "障碍名称",          # 用于图例和输出文件名
-    [x0, y0],             # 初始中心相对 centre 的世界坐标偏移，单位 m
-    [vx, vy],             # 世界坐标速度，单位 m/s
-    [length, width],      # 障碍尺寸，单位 m；length 沿障碍自身 x 轴
-    duration,             # 移动持续时间，单位 s
-    yaw,                  # 障碍朝向，单位 rad，逆时针为正
-)
+机器人速度限制在 YAML 顶层 `robot` 中设置，数值会覆盖 `--config` 对 `flat/offroad` 的同名限制：
+
+```yaml
+robot:
+  max_speed: 0.8       # 前向速度上限，m/s
+  max_speed_y: null    # null 表示沿用 --config；也可填 0.4
+  max_yaw_rate: null   # rad/s
+  max_accel_x: null    # m/s²；其余 max_accel_*、max_decel_* 同理
 ```
 
-当前脚本先取地图像素 `[1174, 671]` 的世界坐标作为 `centre`，再计算
-`origin = centre + [x0, y0]`。因此 `[5, 0]` 表示从路线中心向世界 x 正方向
-5 m 处开始，而不是图片像素坐标，也不是相对机器人坐标。障碍速度同样是世界坐标
-速度；机器人转向后，脚本会在发布点云时把它转换到机器人 `horizon` 坐标系。
+每个场景的 `robot` 设置初始位姿：
+
+```yaml
+robot:
+  reference: route_start  # route_start、centre 或 absolute
+  offset: [0.0, 0.3]      # 相对 reference 的世界坐标偏移，m
+  yaw: 0.0                # 初始朝向，rad
+```
+
+路线支持 `pixel_line`（端点是地图像素）和 `centre_line`（端点相对 `map.centre_pixel`，单位 m）。
+静态障碍写在 `static_obstacles`，每一项是线段采样：
+
+```yaml
+static_obstacles:
+  - {reference: centre, start: [-0.8, -0.37], end: [0.8, -0.37], samples: 33}
+```
+
+也可以用 `shape: rectangle` 定义填充矩形障碍，适合模拟门板、行人或箱体：
+
+```yaml
+static_obstacles:
+  - {shape: rectangle, reference: centre, centre: [0.0, -3.31], size: [0.8, 6.0], spacing: 0.05}
+```
+
+其中 `size` 是矩形长宽，`spacing` 是点云采样间距；矩形的 `centre` 按 `reference` 解释，
+`yaw`（可选）只旋转矩形外形。
+
+动态障碍写在 `dynamic_obstacles`：
+
+```yaml
+dynamic_obstacles:
+  - name: oncoming
+    origin_reference: centre
+    origin: [5.0, 0.3]
+    velocity: [-0.45, 0.0]
+    size: [0.8, 1.0]
+    duration: 16.0
+    delay: 0.0
+    yaw: 3.141592653589793
+```
+
+`origin_reference` 可用 `centre`、`route_start` 或 `absolute`；`velocity` 是世界坐标速度，
+`size` 是长宽（m），`yaw` 只旋转障碍外形，不会自动改变速度方向。脚本仍支持命令行的
+`--obstacle-speed-scale`、`--obstacle-size-scale` 和 `--dynamic-start-delay`，它们作用于 YAML
+中的动态障碍。
+
+例如复制一份配置并只调整迎面障碍与机器人初始位置：
+
+```bash
+cp scripts/tracking_scenarios.yaml tmp/VW7En2y/tracking-test/my_tracking.yaml
+# 编辑 tmp/VW7En2y/tracking-test/my_tracking.yaml 后运行：
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --scenario-config tmp/VW7En2y/tracking-test/my_tracking.yaml \
+  --scenarios dynamic_head_on --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/head-on-custom ...
+```
+
+`...` 代表原命令中的地图、安装包、配置和二进制参数。脚本仍兼容原有
+`--scenario-file` JSON：它适合批量替换动态障碍；一般单场景调试优先使用 YAML。
 
 矩形的 `length` 沿自身 x 轴，`width` 沿自身 y 轴。例如：
 
@@ -65,7 +120,7 @@ GIF 默认 8 帧/秒、2 倍速，最后一帧停留 1.5 秒再循环；某模�
 
 ### 用像素位置设置初始点
 
-如果更习惯用地图像素，先将像素转换为世界坐标，再减去 `centre` 得到偏移：
+如果更习惯用地图像素，先将像素转换为世界坐标，再减去 `centre` 得到 YAML 中的偏移：
 
 ```python
 pixel_world = grid.pixel_world(np.array([[1200, 671]]))[0]
@@ -74,8 +129,7 @@ offset = pixel_world - centre
 
 然后把 `offset.tolist()` 填入定义的第二项。地图 YAML 的 `origin`、分辨率和原点旋转
 都会由 `pixel_world()` 处理，不要直接用 `pixel * resolution` 代替。也可以直接写绝对世界
-坐标，但需要把脚本中的
-`(centre + offset).tolist()` 改为目标坐标列表；保留当前写法更容易在不同地图中心附近移动场景。
+坐标，此时将对应的 `reference` 设为 `absolute`，并把 `offset` 或 `origin` 写成绝对坐标。
 
 ### 不改源码时的统一调整
 
@@ -92,16 +146,37 @@ offset = pixel_world - centre
 持续 `5 s`，仍然移动相同的 5 m。若要改变终点，必须直接修改定义中的初始偏移、速度或
 `duration`，不能只调整速度缩放。
 
-修改定义后重新运行仿真即可；不需要重新编译 C++。每个场景目录的 `scene.json` 会保存
+修改 YAML 后重新运行仿真即可；不需要重新编译 C++。每个场景目录的 `scene.json` 会保存
 实际使用的 `origin`、速度、尺寸、朝向和持续时间，`obstacle-*.csv` 保存每个时刻的位置。
 可以用 `--render-only` 重画 GIF，但它只会重放已经保存的运动参数，不会读取后来改动的
-源码定义。
+YAML。
 
 | `--scenarios` 名称 | 场景 | 障碍长度 × 宽度 | 初始中心偏移（m） | 速度（m/s） | 运动持续时间 |
 | --- | --- | --- | --- | --- | --- |
-| `dynamic_head_on` | 迎面接近 | 0.8 × 0.6 m | `[5,0]` | `[-0.45,0]` | 16 s |
-| `dynamic_crossing` | 横向穿行 | 0.6 × 0.6 m | `[1,-2.4]` | `[0,0.5]` | 9.6 s |
+| `dynamic_head_on` | 迎面接近 | 0.8 × 1.0 m | `[5,0.3]` | `[-0.45,0]` | 16 s |
+| `dynamic_crossing` | 横向穿行 | 0.6 × 0.6 m | `[0.5,-2.4]` | `[0,0.5]` | 9.6 s |
 | `dynamic_overtaking` | 追越同向慢速障碍 | 0.8 × 0.6 m | `[0,0]` | `[0.25,0]` | 16 s |
+
+新增的 `static_narrow_gap` 场景模拟门洞：两个矩形静态障碍物位于同一堵横向障碍墙的
+左右两侧，中间只留 `0.62 m` 门缝，机器人宽度为 `0.47 m`；远处侧墙封住主障碍外侧。
+机器人从门外沿 X 方向驶入门内。该场景直接给 `pathFollower` 发布参考路径，同时发布静态 `/terrain_map`，
+用于验证两种跟踪模式在窄门中的车体碰撞检查；它不会让 `localPlanner` 重新选择绕门路线。
+运行命令：
+
+```bash
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenario-config scripts/tracking_scenarios.yaml \
+  --scenarios static_narrow_gap --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/static-doorway-final --timeout 20
+```
+
+在该地图和当前安装二进制上，两种模式均无碰撞到达：`omni` 约 `4.67 s`，
+`turn_preferred` 约 `4.64 s`；两者最大路线偏差约 `0.025 m`，累计横移均为 `0`。
 
 障碍为填充的矩形，点间距不超过 5 cm，体积相当于行人占用区或小推车，
 不会因为只有一两个点而被体素过滤掉。运动开始前、结束后均停留在端点，不会突然消失。
@@ -110,7 +185,7 @@ offset = pixel_world - centre
 
 运行动态障碍仿真并生成 GIF：
 
-```
+```bash
 cd /home/jazzy/nav_t_ws/src/local_planner
 
 source /opt/ros/jazzy/setup.bash
@@ -127,6 +202,54 @@ source /home/jazzy/nav_t_ws/install/local_setup.bash
   --modes omni,turn_preferred \
   --output tmp/VW7En2y/tracking-test/workspace-dynamic \
   --timeout 45
+
+# head_on
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config /home/jazzy/nav_t_ws/install/local_planner/share/local_planner/config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenarios dynamic_head_on \
+  --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/head_on1 \
+  --timeout 45
+
+# crossing
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config /home/jazzy/nav_t_ws/install/local_planner/share/local_planner/config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenarios dynamic_crossing \
+  --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/crossing1 \
+  --timeout 45
+
+# overtaking
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config /home/jazzy/nav_t_ws/install/local_planner/share/local_planner/config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenarios dynamic_overtaking \
+  --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/overtaking1 \
+  --timeout 45
+
+# overtaking
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config /home/jazzy/nav_t_ws/install/local_planner/share/local_planner/config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenarios static_narrow_gap \
+  --modes omni,turn_preferred \
+  --output tmp/VW7En2y/tracking-test/narrow1 \
+  --timeout 45
 ```
 
 这里：
@@ -137,7 +260,7 @@ source /home/jazzy/nav_t_ws/install/local_setup.bash
 - `--config`：使用安装目录中的 D1M 参数。
 - 脚本自动启动并关闭节点，无需另外运行 launch。
 
-目前安装目录的程序链接到 `build/local_planner/`，配置链接到源码的 `config/d1m.yaml`。\*\*修改 C++ 后需要重新编译；修改该 YAML 后重新运行仿真即可。\*\*仿真会将前向最大速度覆盖为 `0.8 m/s`，并按 `--modes` 覆盖跟踪模式。
+目前安装目录的程序链接到 `build/local_planner/`，配置链接到源码的 `config/d1m.yaml`。\*\*修改 C++ 后需要重新编译；修改 `tracking_scenarios.yaml` 后重新运行仿真即可。\*\*机器人速度由该 YAML 的 `robot` 段控制，默认前向上限为 `0.8 m/s`，并按 `--modes` 覆盖跟踪模式。
 
 如果只测试 `turn_preferred`，改为：
 
@@ -180,18 +303,90 @@ source /home/jazzy/nav_t_ws/install/local_setup.bash
 车体尺寸读取 `--config` 中 `localPlanner.vehicleLength/vehicleWidth`，默认 D1M 为 1.0 × 0.47 m。
 绘图在所有 ROS 运行完成后进行，避免渲染占用控制循环时间；运行时保存实际使用的参数快照。
 
-**2026-10-02 的动态测试结果：**三个场景 × 两种模式均到达目标，但只有追越场景
-两种模式均无接触。迎面和横穿场景均发生接触，所以整组报告为 `FAIL`、进程返回码为 1。
-本轮 `turn_preferred` 追越的最小轮廓间距约 0.164 m，`omni` 仅约 0.004 m；
-无接触不等于安全裕量足够。迎面场景的 `turn_preferred` 曾停车，障碍继续移动后撞向机器人。
-这些是当前参数和一次运行的结果，受实时调度影响，不代表实机的稳定安全能力。
+#### 通用预测轨迹评估（2026-10-03）
 
-当前控制器检查的是当前障碍快照，没有预测其运动速度；动画里的箭头来自仿真设定，
-并未作为速度信息提供给控制器。脚本不修改控制算法、D1M 配置或原始栅格地图。
-接触后仍按指令积分，以暴露后续行为，因此接触之后的轨迹不模拟真实碰撞物理。
-`success` 表示场景检查通过（普通场景检查到达，地形中断场景检查停车）；
-`arrived` 表示到达判据满足，`safe_arrival` 还要求无接触；总报告也要求所有场景无接触。
-`collision_steps` 是检测到接触的采样次数，不是独立事故次数；`collision_seconds` 是累计接触时长。
+原来的固定侧移、3 m 触发距离和单点释放阈值已删除。改进借鉴 Nav2 DWB 的有限候选
+轨迹评分思路，仍在 `pathFollower` 内执行，`localPlanner` 的路径库、路径评分和频率没有改动。
+正常前视跟踪轨迹如果安全，直接使用；否则最多检查 36 条轨迹。候选包括向两侧转向、
+保留航向横移、减速、等待和后退，所有候选都遵守模型限速、加减速度和输出死区。
+
+安全是硬条件：预测矩形车体沿整段轨迹与运动障碍是否重叠；连停车也必须验证，不能将
+“速度为零”视为安全。通过安全检查后，综合前进进度、路径距离、航向、横移量和前后周期
+的选择变化评分。`turn_lateral_cost` 只增加横移代价，不会把危险的转向动作改为可执行。
+当前点云通过空间分组和矩形包围盒预筛选加速，精细碰撞检查保留全部原始障碍点。
+
+动态预测仍由连续 `/terrain_map` 估计障碍速度，不读取仿真对象的速度设定。
+`omni` 不使用这套逻辑；仿真不修改原始地图。匀速预测对定位/点云误差、遮挡和突然加速
+仍有误差；无安全候选时只能报告 blocked，不能保证任意动态障碍都不会撞向停住的机器人。
+
+```yaml
+pathFollower:
+  ros__parameters:
+    turn_predictive_steering: true
+    turn_prediction_horizon: 2.5  # 动态障碍预测长度（s）
+    turn_collision_horizon: 0.6  # 静态场景预测长度（s）
+    turn_lateral_weight: 0.25    # 普通跟踪横移分量权重
+    turn_lateral_cost: 0.6       # 安全候选轨迹的横移软代价
+```
+
+旧的 `turn_predictive_lateral_weight` 和 `turn_predictive_clear_distance` 已删除，不再调节。
+终点位置误差较小时，仅对仍在位置容差外的轴补偿速度死区，避免末端卡住。
+
+仿真新增 `--scenario-file` 和 `--quality-checks`。自定义场景文件见
+`test/scenarios/dynamic_tracking_sweep.json`：`base` 选择已有路线；`origin_offset` 相对路线
+起点，其他障碍参数采用世界坐标。例如 `[7,0.1]` 相对起点，等价于当前迎面场景相对中心
+的 `[5,0.1]`。`--quality-checks` 额外要求动态间距至少 5 cm、轨迹不超过参考路线的 1.3 倍、
+累计航向不形成一整圈、沿路线的后退量不超过 0.5 m、控制计算 P99 小于 20 ms。
+这些阈值用于当前直线动态回归用例，不代表任何导航任务的统一验收阈值。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/jazzy/task_ws/install/local_setup.bash
+source /home/jazzy/nav_t_ws/install/local_setup.bash
+/usr/bin/python3 scripts/test_tracking_on_map.py \
+  --map tmp/VW7En2y/map_000.yaml \
+  --package /home/jazzy/nav_t_ws/install/local_planner/share/local_planner \
+  --config /home/jazzy/nav_t_ws/install/local_planner/share/local_planner/config/d1m.yaml \
+  --binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/pathFollower \
+  --planner-binary /home/jazzy/nav_t_ws/install/local_planner/lib/local_planner/localPlanner \
+  --scenario-file test/scenarios/dynamic_tracking_sweep.json \
+  --scenarios head_0p0,head_0p1,head_neg0p1,head_0p3,head_neg0p3,head_0p5,head_neg0p5,head_slow,head_fast,head_large,cross_reverse,two_oncoming,dynamic_crossing,dynamic_overtaking \
+  --modes turn_preferred --timeout 35 --quality-checks \
+  --output tmp/VW7En2y/tracking-test/rollout-regression --domain-id 195 --no-gif
+```
+
+`--no-gif` 只关闭 GIF 输出，PNG、场景配置、速度与轨迹、局部路径、节点日志仍会保留。
+`result.json` 新增计算耗时 P50/P99/最大值、最大候选数量、最大航向变化、路径横向偏差、
+沿参考路线的后退量，以及各项质量检查。确认报告后可 `--render-only` 生成 GIF。
+仿真用理想平面速度积分，包含完整 ROS 规划与跟踪节点；不模拟实机惯性、打滑和碰撞物理。
+
+
+本轮在 `/home/jazzy/nav_t_ws/build` 和 `install` 完成编译验证，未部署到 D1M-B。
+14 个动态实例（7 个迎面左右偏移、不同速度/尺寸、双向横穿、追越和两个连续迎面障碍）
+均通过上述质量检查。最小动态轮廓间距约 0.082 m；控制计算 P99 最大约 1.53 ms，
+单次最大约 3.34 ms，低于 50 Hz 控制周期的 20 ms。约 4,941 点的加密障碍压力测试
+平均约 0.68 ms、最大约 0.85 ms。耗时是当前本地机器、0.8 m/s 测试模型的测量，
+包含索引和候选控制计算，不包含点云回调、通信和系统调度；D1M-B 应另行测量整条链路。
+
+`[5.0, 0.1]` 的同场景对比：
+
+| 指标 | omni | turn_preferred |
+| --- | ---: | ---: |
+| 接触采样次数 | 0 | 0 |
+| 到达时间 | 18.09 s | 17.75 s |
+| 轨迹长度 | 7.53 m | 7.23 m |
+| 累计车体横移 | 0.89 m | 0.23 m |
+| 最小动态间距 | 0.225 m | 0.083 m |
+| 控制计算 P99 | 未统计 | 1.13 ms |
+
+结果目录：`tmp/VW7En2y/tracking-test/rollout-regression/`（动态扫描报告、各场景 PNG）、
+`rollout-head-on-01/`（两种模式对比 GIF/PNG）。`rollout-regression/validation-summary.json`
+汇总报告、程序 SHA256、压力测试和静态回归。静态检查涵盖平行偏移、死胡同调头、横移
+放行、贴墙转身和地形超时；原先保存的 11 m Smac2D 拐角路线在 `rollout-corner/` 通过。
+首次拐角检查误选了约 113 m 路线，45 s 不足以走完，原始超时报告保留在 `rollout-static/`。
+另有 42 个独立运动学组合（7 种偏移 × 3 种速度 × 2 种路线朝向）通过，使用矩形 SAT
+作为独立碰撞判据，同时要求短路线和无航向回环；300 个位姿检查确认空间预筛选没有
+改变精细点碰撞结果。
 
 几何、时间线、地图坐标转换和 GIF 文件回归检查：
 

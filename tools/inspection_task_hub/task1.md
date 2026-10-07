@@ -942,3 +942,30 @@ D1M-B 上当前"/home/cat/Workspace/task_ws/src/inspection_bringup/scripts/manag
 1. 当前改进后的 local_planner 是以什么方式倾向航向角的，"tracking_mode: "turn_preferred""
 2. nav2 自带的几种局部规划器分别有哪些，是基于什么理念设计的，针对什么类型的机器人
 3. @/home/jazzy/nav_t_ws/src/local_planner/scripts/test_tracking_on_map.py 这个仿真显示并不直观，能否增加 gif 的形式支持，并新增动态障碍(体积合适，至少包含迎面、横向穿行等常见情况)
+
+
+参数上可以先试着降低 `cmdDeadzoneY`、适度提高横移权重，检查是否改善早期修正；但要可靠处理这类迎面场景，算法需要补上：
+- 转向跟踪时的曲率减速；
+- 危险接近时提前放宽横移，而不是等转向指令不可行后才回退；
+- 障碍运动预测，以及停车后仍会被撞的判断
+
+
+问题:
+我稍一改""dynamic_head_on": ("oncoming", [5.0, 0.1], [-0.45, 0.0], [0.8, 0.6], 16.0, math.pi)"，就出现:
+omni 没撞，turn 撞了的情况(@/home/jazzy/nav_t_ws/src/local_planner/tmp/VW7En2y/tracking-test/workspace-dynamic3)
+你不要片面针对场景设计，要有总体通用的设计。如果是之前 turn 设计有问题，你可以重新设计，不要残留无效改进。你可以借鉴 @/home/jazzy/nav_t_ws/src/navigation2 中的局部规划器模块，但不能影响规划时间。
+
+
+问题:
+turn 模式评估 36 条轨迹什么意思，和 omni 模式的轨迹选择不一样吗？而且我发现使用以下指令，结果(@/home/jazzy/nav_t_ws/src/local_planner/tmp/VW7En2y/tracking-test/workspace-dynamic3)和你自己仿真的结果不太一样似乎，为什么？omni 模式有受修改的影响吗，我发现和之前表现不太一样，是我的错觉吗？
+
+
+## 独立的全局规划器
+@/home/jazzy/nav_t_ws/src/multi_map_nav_ros2 使用的是 nav2 自带的全局规划器，如: smac，但我想要更改 smac，使其尽量生成直线，从而减少轮足/四足机器人不必要的调整。是否新建一个模块，基于 smac 进行改进，并且另外命名。这样是否合适，你有什么建议？
+
+说明:
+目标: 长直线段、较少的方向变化、必要拐弯可以稳定通过
+方案: 
+1. Smac 原始路径 → 可通行直线连接 → 必要拐角处理 → 重采样 → 最终校验
+2. “Smac + 安全直线化”插件，该插件是否应当做成独立模块(放在 nav_t_ws/src 下)，且让 multi_map_nav_ros2 可调用？
+完成你的实现，你可以使用 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/scripts/compare_global_planners.py 和 @/home/jazzy/nav_t_ws/src/multi_map_nav_ros2/tmp/VW7En2y(场景) 进行验证。
