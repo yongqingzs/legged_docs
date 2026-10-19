@@ -181,9 +181,47 @@ Host dev-container
 
 之后可以在宿主机执行 `ssh dev-container`，并在 Zed 的新服务器连接框中使用同一命令。
 
-## 容器重启后启动 SSH
+## 容器启动时自动启动 SSH
 
-当前没有配置 SSH 自动启动。容器重启后，在宿主机执行：
+2026-10-18 已为当前容器配置自动启动。容器的启动进程是 `jazzy` 用户的交互式 `/bin/bash`（PID 1），启动时读取 `/home/jazzy/.bashrc`。其中在交互式检查之后加入了以下钩子：
+
+```bash
+# BEGIN container-ssh autostart
+# Start SSH only in this container's initial interactive Bash (PID 1).
+if [[ -r /home/jazzy/scripts/container-ssh/autostart.bash ]]; then
+    . /home/jazzy/scripts/container-ssh/autostart.bash
+fi
+# END container-ssh autostart
+```
+
+`autostart.bash` 仅在 Bash 为 PID 1、处于交互模式且存在 `/.dockerenv` 时调用原有的 `start.sh`。它使用当前容器已有的免密 sudo 权限启动 SSH，普通终端、`docker exec` 和 Zed 会话不会触发。启动输出写入：
+
+```text
+/home/jazzy/.local/state/container-ssh-start.log
+```
+
+因此，后续执行 `docker start jazzy_nvi` 或 `docker restart jazzy_nvi` 后，不再需要手动启动 SSH。
+
+### 验证自动启动
+
+在宿主机执行以下命令。重启会中断当前容器内的程序和编辑器连接，请先安排好正在运行的任务：
+
+```bash
+docker restart jazzy_nvi
+ssh -p 2222 jazzy@127.0.0.1
+```
+
+配置时已检查 Bash 语法、钩子在普通 shell 中不执行启动操作，以及当前 SSH 服务和握手；没有重启正在使用的容器，完整的重启验证仍需执行上述命令。Zed 中的连接方式和公钥配置保持不变。
+
+### 日志和手动恢复
+
+在宿主机查看自动启动日志：
+
+```bash
+docker exec -u jazzy jazzy_nvi tail -n 80 /home/jazzy/.local/state/container-ssh-start.log
+```
+
+首次由容器启动钩子执行之前，该日志文件可能不存在。如需手动恢复 SSH，可在宿主机执行：
 
 ```bash
 docker exec -u root jazzy_nvi bash /home/jazzy/scripts/container-ssh/start.sh
@@ -195,7 +233,13 @@ docker exec -u root jazzy_nvi bash /home/jazzy/scripts/container-ssh/start.sh
 docker start jazzy_nvi
 ```
 
-容器 PID 1 是 `bash`，启动脚本直接管理 `sshd`，无需使用 `systemctl`。后续可以将脚本加入现有容器启动流程。删除并重建容器时，需要重新安装服务端，并确保配置、脚本、主机密钥和授权公钥得到保留或重新配置。
+### 适用范围和撤销
+
+当前容器没有运行 systemd，无需使用 `systemctl enable ssh`。本方案依赖现有的交互式 Bash 启动方式和免密 sudo 权限。如果以后改变容器启动用户、启动命令、使用 `--norc` 或让 Bash 不再是 PID 1，需要重新配置。新镜像通常应把 SSH 启动放入 ENTRYPOINT，在原来的主命令之前执行。
+
+这项配置不负责在宿主机开机时自动启动容器，也不负责 SSH 服务异常退出后的自动拉起。删除并重建容器时，需要重新安装服务端，并确保配置、脚本、主机密钥和授权公钥得到保留或重新配置。
+
+撤销自动启动时，从 `/home/jazzy/.bashrc` 删除 `# BEGIN container-ssh autostart` 到 `# END container-ssh autostart` 之间的整个区块即可。修改前的 `.bashrc` 已备份为 `/home/jazzy/.bashrc.before-container-ssh-20261018T044358Z`。
 
 ## 排查连接问题
 
